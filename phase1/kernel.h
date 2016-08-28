@@ -19,6 +19,7 @@ struct procStruct {
    unsigned int    stackSize;
    int             status;        /* READY, BLOCKED, QUIT, etc. */
    /* other fields as needed... */
+   int             open;          /* 1 if this slot in the process table is empty, 0 if it is taken */
 };
 
 struct psrBits {

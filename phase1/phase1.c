@@ -56,6 +56,9 @@ void startup()
     // initialize the process table
     if (DEBUG && debugflag)
         USLOSS_Console("startup(): initializing process table, ProcTable[]\n");
+    int i; // can't declare loop variables inside the loop because its not in C99 mode
+    for (i = 0; i < MAXPROC; i++)
+        ProcTable[i].open = 1; // set each slot to be open
 
     // Initialize the Ready list, etc.
     if (DEBUG && debugflag)
@@ -106,6 +109,25 @@ void finish()
         USLOSS_Console("in finish...\n");
 } /* finish */
 
+
+/* ------------------------------------------------------------------------
+   Author: Charlie Fractal
+   Name - requireKernalMode
+   Purpose - Checks if we are in kernal mode and prints an error messages
+              and halts USLOSS if not.
+              It should be called by every function in phase 1.
+   Parameters - The name of the function calling it, for the error message.
+   Side Effects - Prints and halts if we are not in kernal mode
+   ------------------------------------------------------------------------ */
+void requireKernalMode(char *name)
+{
+    if (USLOSS_PsrGet() != 1) { // kernal mode is 1
+        USLOSS_Console("%s: Not in kernal mode. Halting...", name);
+        USLOSS_Halt(1); // from phase1 pdf
+    }
+} /* requireKernalMode */
+
+
 /* ------------------------------------------------------------------------
    Name - fork1
    Purpose - Gets a new process from the process table and initializes
@@ -127,10 +149,47 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
         USLOSS_Console("fork1(): creating process %s\n", name);
 
     // test if in kernel mode; halt if in user mode
+    requireKernalMode("fork1()"); 
 
     // Return if stack size is too small
+    if (stacksize < USLOSS_MIN_STACK) { // found in usloss.h
+        USLOSS_Console("fork1(): Stack size too small.");
+        return -2; // from the phase1 pdf
+    }
+
+    // Return if startFunc is null
+    if (startFunc == NULL) { 
+        USLOSS_Console("fork1(): Start function is null.");
+        return -1; // from the phase1 pdf
+    }
+
+    // Return if name is null
+    if (name == NULL) { 
+        USLOSS_Console("fork1(): Process name is null.");
+        return -1; // from the phase1 pdf
+    }
+
+    // Return if priority is out of range (except sentinel, which is below the min)
+    if ((priority > MINPRIORITY || priority < MAXPRIORITY) && startFunc != sentinel) { 
+        USLOSS_Console("fork1(): Priority is out of range.");
+        return -1; // from the phase1 pdf
+    }
 
     // find an empty slot in the process table
+    int i; // can't declare loop variables inside the loop because its not in C99 mode
+    for (i = 0; i < MAXPROC; i++) {
+        if (ProcTable[i].open) { // found an empty spot
+            procSlot = i;
+            ProcTable[i].open = 0; // set slot to be taken
+            break; 
+        }
+    }
+
+    // handle case where there is no empty spot
+    if (procSlot < 0) {
+        USLOSS_Console("fork1(): No empty slot on the process table.");
+        return -1;
+    }
 
     // fill-in entry in process table */
     if ( strlen(name) >= (MAXNAME - 1) ) {
@@ -148,6 +207,13 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     else
         strcpy(ProcTable[procSlot].startArg, arg);
 
+    // allocate the stack
+    ProcTable[procSlot].stack = (char *) malloc(stacksize);
+    ProcTable[procSlot].stackSize = stacksize;
+
+    // set the process id
+    ProcTable[procSlot].pid = nextPid++;
+
     // Initialize context for this process, but use launch function pointer for
     // the initial value of the process's program counter (PC)
 
@@ -160,8 +226,11 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     p1_fork(ProcTable[procSlot].pid);
 
     // More stuff to do here...
+    dispatcher(); // let dispatcher decide which process runs next
 
-    return -1;  // -1 is not correct! Here to prevent warning.
+    // enable interrupts for the parent
+
+    return ProcTable[procSlot].pid;  // return child's pid
 } /* fork1 */
 
 /* ------------------------------------------------------------------------
@@ -180,6 +249,7 @@ void launch()
         USLOSS_Console("launch(): started\n");
 
     // Enable interrupts
+
 
     // Call the function passed to fork1, and capture its return value
     result = Current->startFunc(Current->startArg);

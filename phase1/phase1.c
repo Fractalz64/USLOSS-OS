@@ -70,6 +70,8 @@ void startup()
         ReadyList[i].size = 0;
     }
 
+    Current = NULL; // initialize current process pointer
+
     // Initialize the clock interrupt handler
 
     // startup a sentinel process
@@ -240,7 +242,7 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     // add process to the approriate ready list
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): adding process to ready list %d...\n", priority-1);
-    enq(ReadyList[priority-1], &ProcTable[procSlot]);
+    enq(&ReadyList[priority-1], &ProcTable[procSlot]);
     USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
 
     // let dispatcher decide which process runs next
@@ -335,9 +337,8 @@ void dispatcher(void)
     // Find the highest priority non-empty process queue
     int i;
     for (i = 0; i < SENTINELPRIORITY; i++) {
-        USLOSS_Console("List: %d, size = %d\n", i, ReadyList[i].size);
         if (ReadyList[i].size > 0) {
-            nextProcess = deq(ReadyList[i]);
+            nextProcess = deq(&ReadyList[i]);
             break;
         }
     }
@@ -349,9 +350,22 @@ void dispatcher(void)
     }
 
     if (DEBUG && debugflag)
-        USLOSS_Console("dispatcher(): next process is \n", nextProcess->pid);
+        USLOSS_Console("dispatcher(): next process is %s\n", nextProcess->name);
 
-    p1_switch(Current->pid, nextProcess->pid);
+    // Put current back on the queue 
+    if (Current != NULL) {
+        p1_switch(Current->pid, nextProcess->pid);
+        enq(&ReadyList[Current->priority-1], Current);
+    }
+
+    // Set Current to nextProcess
+    Current = nextProcess;
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("dispatcher(): set current process to %s, calling launch\n", nextProcess->name);
+
+    // Call launch 
+    launch();
 } /* dispatcher */
 
 

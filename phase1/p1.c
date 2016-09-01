@@ -1,6 +1,6 @@
 
 #include "usloss.h"
-#define DEBUG 0
+#define DEBUG 1
 extern int debugflag;
 
 void

@@ -31,7 +31,8 @@ int debugflag = 1;
 procStruct ProcTable[MAXPROC];
 
 // Process lists
-static procPtr ReadyList;
+// static procPtr ReadyList;
+procQueue ReadyList[SENTINELPRIORITY];
 
 // current process ID
 procPtr Current;
@@ -60,10 +61,14 @@ void startup()
     for (i = 0; i < MAXPROC; i++)
         ProcTable[i].open = 1; // set each slot to be open
 
-    // Initialize the Ready list, etc.
+    // Initialize the ReadyList, etc.
     if (DEBUG && debugflag)
         USLOSS_Console("startup(): initializing the Ready list\n");
-    ReadyList = NULL;
+    for (i = 0; i < SENTINELPRIORITY; i++) {
+        ReadyList[i].head = NULL;
+        ReadyList[i].tail = NULL;
+        ReadyList[i].size = 0;
+    }
 
     // Initialize the clock interrupt handler
 
@@ -122,7 +127,7 @@ void finish()
 void requireKernalMode(char *name)
 {
     if (USLOSS_PsrGet() != 1) { // kernal mode is 1
-        USLOSS_Console("%s: Not in kernal mode. Halting...", name);
+        USLOSS_Console("%s: Not in kernal mode. Halting...\n", name);
         USLOSS_Halt(1); // from phase1 pdf
     }
 } /* requireKernalMode */
@@ -153,25 +158,25 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 
     // Return if stack size is too small
     if (stacksize < USLOSS_MIN_STACK) { // found in usloss.h
-        USLOSS_Console("fork1(): Stack size too small.");
+        USLOSS_Console("fork1(): Stack size too small.\n");
         return -2; // from the phase1 pdf
     }
 
     // Return if startFunc is null
     if (startFunc == NULL) { 
-        USLOSS_Console("fork1(): Start function is null.");
+        USLOSS_Console("fork1(): Start function is null.\n");
         return -1; // from the phase1 pdf
     }
 
     // Return if name is null
     if (name == NULL) { 
-        USLOSS_Console("fork1(): Process name is null.");
+        USLOSS_Console("fork1(): Process name is null.\n");
         return -1; // from the phase1 pdf
     }
 
     // Return if priority is out of range (except sentinel, which is below the min)
     if ((priority > MINPRIORITY || priority < MAXPRIORITY) && startFunc != sentinel) { 
-        USLOSS_Console("fork1(): Priority is out of range.");
+        USLOSS_Console("fork1(): Priority is out of range.\n");
         return -1; // from the phase1 pdf
     }
 
@@ -187,7 +192,7 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 
     // handle case where there is no empty spot
     if (procSlot < 0) {
-        USLOSS_Console("fork1(): No empty slot on the process table.");
+        USLOSS_Console("fork1(): No empty slot on the process table.\n");
         return -1;
     }
 
@@ -208,14 +213,20 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
         strcpy(ProcTable[procSlot].startArg, arg);
 
     // allocate the stack
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): allocating the stack, size %d\n", stacksize);
     ProcTable[procSlot].stack = (char *) malloc(stacksize);
     ProcTable[procSlot].stackSize = stacksize;
 
     // set the process id
     ProcTable[procSlot].pid = nextPid++;
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): set process id to %d\n", ProcTable[procSlot].pid);
 
     // Initialize context for this process, but use launch function pointer for
     // the initial value of the process's program counter (PC)
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): initializing context...\n");
 
     USLOSS_ContextInit(&(ProcTable[procSlot].state), USLOSS_PsrGet(),
                        ProcTable[procSlot].stack,
@@ -226,10 +237,22 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     p1_fork(ProcTable[procSlot].pid);
 
     // More stuff to do here...
-    dispatcher(); // let dispatcher decide which process runs next
+    // add process to the approriate ready list
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): adding process to ready list %d...\n", priority-1);
+    enq(ReadyList[priority-1], &ProcTable[procSlot]);
+    USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
+
+    // let dispatcher decide which process runs next
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): calling dispatcher...\n");
+    dispatcher(); 
 
     // enable interrupts for the parent
 
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): returning...\n");
     return ProcTable[procSlot].pid;  // return child's pid
 } /* fork1 */
 
@@ -309,6 +332,25 @@ void dispatcher(void)
 {
     procPtr nextProcess = NULL;
 
+    // Find the highest priority non-empty process queue
+    int i;
+    for (i = 0; i < SENTINELPRIORITY; i++) {
+        USLOSS_Console("List: %d, size = %d\n", i, ReadyList[i].size);
+        if (ReadyList[i].size > 0) {
+            nextProcess = deq(ReadyList[i]);
+            break;
+        }
+    }
+
+    // Print message and return if the ready list is empty
+    if (nextProcess == NULL) {
+        USLOSS_Console("dispatcher(): ready list is empty!\n");
+        return;
+    }
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("dispatcher(): next process is \n", nextProcess->pid);
+
     p1_switch(Current->pid, nextProcess->pid);
 } /* dispatcher */
 
@@ -357,3 +399,24 @@ void disableInterrupts()
         // We ARE in kernel mode
         USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
 } /* disableInterrupts */
+
+
+/* ------------------------------------------------------------------------
+   Name - dumpProcesses
+   Purpose - Prints information about each process on the process table,
+             for debugging.
+   Parameters - none
+   Returns - nothing
+   Side Effects - none
+   ----------------------------------------------------------------------- */
+void dumpProcesses()
+{
+    int i;
+    for (i = 0; i < MAXPROC; i++) {
+        USLOSS_Console("PID: %d\n", ProcTable[i].pid);
+        USLOSS_Console("Name: %s\n", ProcTable[i].name);
+        USLOSS_Console("Priority: %d\n", ProcTable[i].priority);
+        USLOSS_Console("Status: %d\n", ProcTable[i].status);
+        USLOSS_Console("Open: %d\n", ProcTable[i].open);
+    }
+}

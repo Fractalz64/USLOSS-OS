@@ -50,6 +50,7 @@ extern int   readCurStartTime(void);
 extern void  timeSlice(void);
 extern void  dispatcher(void);
 extern int   readtime(void);
+extern void  disableInterrupts(void);
 
 extern void  p1_fork(int pid);
 extern void  p1_quit(int pid);

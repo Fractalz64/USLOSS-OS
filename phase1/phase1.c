@@ -20,6 +20,8 @@ extern int start1 (char *);
 void dispatcher(void);
 void launch();
 static void checkDeadlock();
+void enableInterrupts(void);
+void requireKernalMode(char *);
 
 
 /* -------------------------- Globals ------------------------------------- */
@@ -52,14 +54,30 @@ unsigned int nextPid = SENTINELPID;
    ----------------------------------------------------------------------- */
 void startup()
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("startup()"); 
+
     int result; // value returned by call to fork1()
 
     // initialize the process table
     if (DEBUG && debugflag)
         USLOSS_Console("startup(): initializing process table, ProcTable[]\n");
     int i; // can't declare loop variables inside the loop because its not in C99 mode
-    for (i = 0; i < MAXPROC; i++)
+    // init the fields of each process
+    for (i = 0; i < MAXPROC; i++) {
+        ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
         ProcTable[i].open = 1; // set each slot to be open
+        ProcTable[i].nextProcPtr = NULL;
+        ProcTable[i].childProcPtr = NULL;
+        ProcTable[i].nextSiblingPtr = NULL;
+        //ProcTable[i].state =  NULL;
+        ProcTable[i].startFunc = NULL;
+        ProcTable[i].priority = -1;
+        ProcTable[i].stack = NULL;
+        ProcTable[i].stackSize = -1;
+        ProcTable[i].status = -1;
+        ProcTable[i].parentPtr = NULL;
+    }
 
     // Initialize the ReadyList, etc.
     if (DEBUG && debugflag)
@@ -70,7 +88,8 @@ void startup()
         ReadyList[i].size = 0;
     }
 
-    Current = NULL; // initialize current process pointer
+    // initialize current process pointer so that dispatcher doesn't have issues at startup
+    Current = &ProcTable[MAXPROC-1]; 
 
     // Initialize the clock interrupt handler
 
@@ -112,6 +131,9 @@ void startup()
    ----------------------------------------------------------------------- */
 void finish()
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("finish()"); 
+
     if (DEBUG && debugflag)
         USLOSS_Console("in finish...\n");
 } /* finish */
@@ -220,6 +242,12 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     ProcTable[procSlot].stack = (char *) malloc(stacksize);
     ProcTable[procSlot].stackSize = stacksize;
 
+    // make sure malloc worked, halt otherwise
+    if (ProcTable[procSlot].stack == NULL) {
+        USLOSS_Console("fork1(): Malloc failed.  Halting...\n");
+        USLOSS_Halt(1);
+    }
+
     // set the process id
     ProcTable[procSlot].pid = nextPid++;
     if (DEBUG && debugflag)
@@ -268,13 +296,19 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
    ------------------------------------------------------------------------ */
 void launch()
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("launch()"); 
+
     int result;
 
     if (DEBUG && debugflag)
         USLOSS_Console("launch(): started\n");
 
     // Enable interrupts
+    enableInterrupts();
 
+    if (DEBUG && debugflag)
+        USLOSS_Console("launch(): starting current process: %d\n", Current->pid);
 
     // Call the function passed to fork1, and capture its return value
     result = Current->startFunc(Current->startArg);
@@ -301,6 +335,9 @@ void launch()
    ------------------------------------------------------------------------ */
 int join(int *status)
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("join()"); 
+
     return -1;  // -1 is not correct! Here to prevent warning.
 } /* join */
 
@@ -316,6 +353,9 @@ int join(int *status)
    ------------------------------------------------------------------------ */
 void quit(int status)
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("quit()"); 
+
     p1_quit(Current->pid);
 } /* quit */
 
@@ -332,13 +372,16 @@ void quit(int status)
    ----------------------------------------------------------------------- */
 void dispatcher(void)
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("dispatcher()"); 
+
     procPtr nextProcess = NULL;
 
     // Find the highest priority non-empty process queue
     int i;
     for (i = 0; i < SENTINELPRIORITY; i++) {
         if (ReadyList[i].size > 0) {
-            nextProcess = deq(&ReadyList[i]);
+            nextProcess = peek(&ReadyList[i]);
             break;
         }
     }
@@ -352,20 +395,20 @@ void dispatcher(void)
     if (DEBUG && debugflag)
         USLOSS_Console("dispatcher(): next process is %s\n", nextProcess->name);
 
-    // Put current back on the queue 
-    if (Current != NULL) {
-        p1_switch(Current->pid, nextProcess->pid);
-        enq(&ReadyList[Current->priority-1], Current);
-    }
-
-    // Set Current to nextProcess
+    // update current
+    procPtr old = Current;
     Current = nextProcess;
 
-    if (DEBUG && debugflag)
-        USLOSS_Console("dispatcher(): set current process to %s, calling launch\n", nextProcess->name);
+    // your dispatcher should call p1_switch(int old, int new) with the 
+    // PID’s of the process that was previously running and the next process to run. 
+    // You will enable interrupts before you call USLOSS_ContextSwitch. 
+    // The call to p1_switch should be called just before you enable interrupts
+    p1_switch(old->pid, nextProcess->pid);
+    enableInterrupts();
+    USLOSS_ContextSwitch(&old->state, &nextProcess->state);
 
-    // Call launch 
-    launch();
+    if (DEBUG && debugflag)
+        USLOSS_Console("dispatcher(): called USLOSS_ContextSwitch, Current = \n", Current->name);
 } /* dispatcher */
 
 
@@ -382,6 +425,9 @@ void dispatcher(void)
    ----------------------------------------------------------------------- */
 int sentinel (char *dummy)
 {
+    // test if in kernel mode; halt if in user mode
+    requireKernalMode("sentinel()"); 
+
     if (DEBUG && debugflag)
         USLOSS_Console("sentinel(): called\n");
     while (1)
@@ -413,6 +459,40 @@ void disableInterrupts()
         // We ARE in kernel mode
         USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
 } /* disableInterrupts */
+
+void printBits(unsigned int n) {
+    while (n) {
+        if (n & 1)
+            USLOSS_Console("1");
+        else
+            USLOSS_Console("0");
+
+        n >>= 1;
+    }
+    USLOSS_Console("\n");
+}
+
+/*
+ * Enables the interrupts.
+ */
+void enableInterrupts()
+{
+    // turn the interrupts ON iff we are in kernel mode
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
+        //not in kernel mode
+        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
+        USLOSS_Console("enable interrupts\n");
+        USLOSS_Halt(1);
+    } else {
+        unsigned int newPSR = USLOSS_PsrGet();
+        newPSR |= 1 << 1; // set bit 1 to 1
+        USLOSS_Console("enableInterrupts(): PSR before: "); 
+        printBits(USLOSS_PsrGet());
+        USLOSS_PsrSet(newPSR);
+        USLOSS_Console("enableInterrupts(): PSR after: ");    
+        printBits(USLOSS_PsrGet());
+    }
+} /* enableInterrupts */
 
 
 /* ------------------------------------------------------------------------

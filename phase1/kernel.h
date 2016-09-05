@@ -23,6 +23,11 @@ struct procStruct {
 	procPtr         parentPtr;
 };
 
+/* process statuses */
+#define READY 1
+#define BLOCKED 2
+#define QUIT 3
+
 struct psrBits {
 	unsigned int curMode:1;
 	unsigned int curIntEnable:1;

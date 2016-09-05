@@ -22,7 +22,7 @@ void launch();
 static void checkDeadlock();
 void enableInterrupts(void);
 void requireKernalMode(char *);
-
+void clockHandler();
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -92,19 +92,20 @@ void startup()
     Current = &ProcTable[MAXPROC-1]; 
 
     // Initialize the clock interrupt handler
+    USLOSS_IntVec[USLOSS_CLOCK_INT] = clockHandler;
 
     // startup a sentinel process
-    if (DEBUG && debugflag)
-        USLOSS_Console("startup(): calling fork1() for sentinel\n");
-    result = fork1("sentinel", sentinel, NULL, USLOSS_MIN_STACK,
-                    SENTINELPRIORITY);
-    if (result < 0) {
-        if (DEBUG && debugflag) {
-            USLOSS_Console("startup(): fork1 of sentinel returned error, ");
-            USLOSS_Console("halting...\n");
-        }
-        USLOSS_Halt(1);
-    }
+    // if (DEBUG && debugflag)
+    //     USLOSS_Console("startup(): calling fork1() for sentinel\n");
+    // result = fork1("sentinel", sentinel, NULL, USLOSS_MIN_STACK,
+    //                 SENTINELPRIORITY);
+    // if (result < 0) {
+    //     if (DEBUG && debugflag) {
+    //         USLOSS_Console("startup(): fork1 of sentinel returned error, ");
+    //         USLOSS_Console("halting...\n");
+    //     }
+    //     USLOSS_Halt(1);
+    // }
   
     // start the test process
     if (DEBUG && debugflag)
@@ -121,6 +122,7 @@ void startup()
 
     return;
 } /* startup */
+
 
 /* ------------------------------------------------------------------------
    Name - finish
@@ -150,7 +152,7 @@ void finish()
    ------------------------------------------------------------------------ */
 void requireKernalMode(char *name)
 {
-    if (USLOSS_PsrGet() != 1) { // kernal mode is 1
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
         USLOSS_Console("%s: Not in kernal mode. Halting...\n", name);
         USLOSS_Halt(1); // from phase1 pdf
     }
@@ -272,6 +274,18 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
         USLOSS_Console("fork1(): adding process to ready list %d...\n", priority-1);
     enq(&ReadyList[priority-1], &ProcTable[procSlot]);
     USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
+    ProcTable[procSlot].status = READY;
+
+    // add process to parent's (current's) list of children, iff parent exists 
+    if (Current->pid > -1) {
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): adding child to parent's list of children...\n");
+        procPtr childSlot = Current->childProcPtr;
+        while (childSlot != NULL) {
+            childSlot = childSlot->nextSiblingPtr;
+        }
+        childSlot = &ProcTable[procSlot];
+    }
 
     // let dispatcher decide which process runs next
     if (DEBUG && debugflag)
@@ -279,12 +293,13 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     dispatcher(); 
 
     // enable interrupts for the parent
-
+    enableInterrupts();
 
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): returning...\n");
     return ProcTable[procSlot].pid;  // return child's pid
 } /* fork1 */
+
 
 /* ------------------------------------------------------------------------
    Name - launch
@@ -441,7 +456,25 @@ int sentinel (char *dummy)
 /* check to determine if deadlock has occurred... */
 static void checkDeadlock()
 {
+    if (DEBUG && debugflag)
+        USLOSS_Console("checkDeadlock(): called\n");
+
 } /* checkDeadlock */
+
+
+/* ------------------------------------------------------------------------
+   Name - clockHandler
+   Purpose - Checks if the current process has exceeded its time slice. 
+            Calls dispatcher() if necessary.
+   Parameters - none
+   Returns - nothing
+   Side Effects - may call dispatcher()
+   ----------------------------------------------------------------------- */
+void clockHandler()
+{
+    if (DEBUG && debugflag)
+        USLOSS_Console("clockHandler(): called\n");
+} /* clockHandler */
 
 
 /*
@@ -458,6 +491,8 @@ void disableInterrupts()
     } else
         // We ARE in kernel mode
         USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
+        if (DEBUG && debugflag)
+            USLOSS_Console("Interrupts disabled.\n");
 } /* disableInterrupts */
 
 void printBits(unsigned int n) {
@@ -471,6 +506,7 @@ void printBits(unsigned int n) {
     }
     USLOSS_Console("\n");
 }
+
 
 /*
  * Enables the interrupts.
@@ -491,6 +527,8 @@ void enableInterrupts()
         USLOSS_PsrSet(newPSR);
         USLOSS_Console("enableInterrupts(): PSR after: ");    
         printBits(USLOSS_PsrGet());
+        if (DEBUG && debugflag)
+            USLOSS_Console("Interrupts enabled.\n");
     }
 } /* enableInterrupts */
 

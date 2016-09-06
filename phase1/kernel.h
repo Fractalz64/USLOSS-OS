@@ -19,14 +19,17 @@ struct procStruct {
 	unsigned int    stackSize;
 	int             status;        /* READY, BLOCKED, QUIT, etc. */
 	/* other fields as needed... */
-	int             open;          /* 1 if this slot in the process table is empty, 0 if it is taken */
 	procPtr         parentPtr;
+	int 			quitStatus;		/* whatever the process returns when it quits */
+	// procQueue		quitChildren;	/* list of children who have quit in the order they have quit */
 };
 
 /* process statuses */
+#define UNUSED 0
 #define READY 1
-#define BLOCKED 2
-#define QUIT 3
+#define RUNNING 2
+#define BLOCKED 3
+#define QUIT 4
 
 struct psrBits {
 	unsigned int curMode:1;
@@ -57,6 +60,14 @@ struct procQueue {
 	int size;
 };
 
+/* Initialize the given procQueue */
+void initProcQueue(procQueue* q) {
+	q->head = NULL;
+	q->tail = NULL;
+	q->size = 0;
+}
+
+/* Add the given procPtr to the back of the given queue. */
 void enq(procQueue* q, procPtr p) {
 	USLOSS_Console("enquing process id %d\n", p->pid);
 	if (q->head == NULL && q->tail == NULL) {
@@ -71,6 +82,7 @@ void enq(procQueue* q, procPtr p) {
 	USLOSS_Console("size = %d\n", q->size);
 }
 
+/* Remove and return the head of the given queue. */
 procPtr deq(procQueue* q) {
 	procPtr temp = q->head;
 	if (q->head == NULL) {
@@ -91,6 +103,7 @@ procPtr deq(procQueue* q) {
 	return temp;
 }
 
+/* Return the head of the given queue. */
 procPtr peek(procQueue* q) {
 	if (q->head == NULL) {
 		printf("Empty Queue\n");

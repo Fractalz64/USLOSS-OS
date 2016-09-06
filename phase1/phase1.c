@@ -65,9 +65,9 @@ void startup()
     int i; // can't declare loop variables inside the loop because its not in C99 mode
     // init the fields of each process
     for (i = 0; i < MAXPROC; i++) {
+        ProcTable[i].status = UNUSED; // set status to be open
         ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
-        ProcTable[i].open = 1; // set each slot to be open
-        ProcTable[i].nextProcPtr = NULL;
+        ProcTable[i].nextProcPtr = NULL; // set pointers to null
         ProcTable[i].childProcPtr = NULL;
         ProcTable[i].nextSiblingPtr = NULL;
         //ProcTable[i].state =  NULL;
@@ -75,17 +75,15 @@ void startup()
         ProcTable[i].priority = -1;
         ProcTable[i].stack = NULL;
         ProcTable[i].stackSize = -1;
-        ProcTable[i].status = -1;
         ProcTable[i].parentPtr = NULL;
+        // initProcQueue(&ProcTable[i].quitChildren); // **not sure about this!
     }
 
     // Initialize the ReadyList, etc.
     if (DEBUG && debugflag)
         USLOSS_Console("startup(): initializing the Ready list\n");
     for (i = 0; i < SENTINELPRIORITY; i++) {
-        ReadyList[i].head = NULL;
-        ReadyList[i].tail = NULL;
-        ReadyList[i].size = 0;
+        initProcQueue(&ReadyList[i]);
     }
 
     // initialize current process pointer so that dispatcher doesn't have issues at startup
@@ -174,6 +172,8 @@ void requireKernalMode(char *name)
 int fork1(char *name, int (*startFunc)(char *), char *arg,
           int stacksize, int priority)
 {
+    disableInterrupts(); // disable interrupts?
+
     int procSlot = -1;
 
     if (DEBUG && debugflag)
@@ -209,9 +209,8 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     // find an empty slot in the process table
     int i; // can't declare loop variables inside the loop because its not in C99 mode
     for (i = 0; i < MAXPROC; i++) {
-        if (ProcTable[i].open) { // found an empty spot
+        if (ProcTable[i].status == UNUSED) { // found an empty spot
             procSlot = i;
-            ProcTable[i].open = 0; // set slot to be taken
             break; 
         }
     }
@@ -269,13 +268,6 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     p1_fork(ProcTable[procSlot].pid);
 
     // More stuff to do here...
-    // add process to the approriate ready list
-    if (DEBUG && debugflag)
-        USLOSS_Console("fork1(): adding process to ready list %d...\n", priority-1);
-    enq(&ReadyList[priority-1], &ProcTable[procSlot]);
-    USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
-    ProcTable[procSlot].status = READY;
-
     // add process to parent's (current's) list of children, iff parent exists 
     if (Current->pid > -1) {
         if (DEBUG && debugflag)
@@ -286,6 +278,13 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
         }
         childSlot = &ProcTable[procSlot];
     }
+
+    // add process to the approriate ready list
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): adding process to ready list %d...\n", priority-1);
+    enq(&ReadyList[priority-1], &ProcTable[procSlot]);
+    USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
+    ProcTable[procSlot].status = READY;
 
     // let dispatcher decide which process runs next
     if (DEBUG && debugflag)
@@ -325,6 +324,8 @@ void launch()
     if (DEBUG && debugflag)
         USLOSS_Console("launch(): starting current process: %d\n", Current->pid);
 
+    Current->status = RUNNING; // set status to RUNNING
+
     // Call the function passed to fork1, and capture its return value
     result = Current->startFunc(Current->startArg);
 
@@ -353,6 +354,19 @@ int join(int *status)
     // test if in kernel mode; halt if in user mode
     requireKernalMode("join()"); 
 
+    if (DEBUG && debugflag)
+        USLOSS_Console("join(): In join, pid = \n", Current->pid);
+
+    // return -2 if process has no children
+    if (Current->childProcPtr == NULL) {
+        if (DEBUG && debugflag)
+            USLOSS_Console("join(): process has no children, returning...\n");
+
+        return -2;
+    }
+
+
+
     return -1;  // -1 is not correct! Here to prevent warning.
 } /* join */
 
@@ -370,6 +384,33 @@ void quit(int status)
 {
     // test if in kernel mode; halt if in user mode
     requireKernalMode("quit()"); 
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("quit(): in quit for process pid = %d\n", Current->pid);
+
+    // print error message and halt if process with active children calls quit
+    // loop though children to find if any are active
+    procPtr childPtr = Current->childProcPtr;
+    while (childPtr != NULL) {
+        if (childPtr->status != QUIT) {
+            USLOSS_Console("quit(): Error: Process has active children.  Halting...\n");
+            USLOSS_Halt(1);
+        }
+    }
+
+    Current->status = QUIT; // change status to QUIT
+    Current->quitStatus = status; // store the given status
+
+     if (DEBUG && debugflag)
+        USLOSS_Console("quit(): removing process from ready list...\n");
+    deq(&ReadyList[Current->priority-1]); // remove self from ready list
+
+    // Below code commented out because current queue implementation would have it overwrite the nextProcPtrs which are used for the ready lists...
+    // if (DEBUG && debugflag)
+    //     USLOSS_Console("quit(): adding process to parent's list if quit children...\n");
+    // enq(Current->parentPtr.quitChildren, Current); // add self to parent's quit children list
+
+    // to do later: unblock processes that zap'd this process
 
     p1_quit(Current->pid);
 } /* quit */
@@ -549,6 +590,5 @@ void dumpProcesses()
         USLOSS_Console("Name: %s\n", ProcTable[i].name);
         USLOSS_Console("Priority: %d\n", ProcTable[i].priority);
         USLOSS_Console("Status: %d\n", ProcTable[i].status);
-        USLOSS_Console("Open: %d\n", ProcTable[i].open);
     }
 }

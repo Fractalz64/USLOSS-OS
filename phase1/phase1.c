@@ -253,6 +253,11 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     ProcTable[procSlot].pid = nextPid++;
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): set process id to %d\n", ProcTable[procSlot].pid);
+	
+	// set the process priority
+	ProcTable[procSlot].priority = 1;
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): set process priority to %d\n", ProcTable[procSlot].priority);
 
     // Initialize context for this process, but use launch function pointer for
     // the initial value of the process's program counter (PC)
@@ -277,11 +282,13 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
             childSlot = childSlot->nextSiblingPtr;
         }
         childSlot = &ProcTable[procSlot];
+		Current->childProcPtr = &ProcTable[procSlot]; // i don't know
+		Current->childProcPtr->priority = priority;
     }
 
     // add process to the approriate ready list
     if (DEBUG && debugflag)
-        USLOSS_Console("fork1(): adding process to ready list %d...\n", priority-1);
+        USLOSS_Console("fork1(): adding process to ready list %d...\n", priority);
     enq(&ReadyList[priority-1], &ProcTable[procSlot]);
     USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
     ProcTable[procSlot].status = READY;
@@ -296,6 +303,7 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): returning...\n");
+	USLOSS_Console("fork1(): child priority %d\n", ProcTable[procSlot].priority);
     return ProcTable[procSlot].pid;  // return child's pid
 } /* fork1 */
 
@@ -355,16 +363,31 @@ int join(int *status)
     requireKernalMode("join()"); 
 
     if (DEBUG && debugflag)
-        USLOSS_Console("join(): In join, pid = \n", Current->pid);
+        USLOSS_Console("join(): In join, pid = %d\n", Current->pid);
 
-    // return -2 if process has no children
-    if (Current->childProcPtr == NULL) {
-        if (DEBUG && debugflag)
-            USLOSS_Console("join(): process has no children, returning...\n");
-
-        return -2;
-    }
-
+	// check if has children
+	if (Current->childProcPtr == NULL) {
+		USLOSS_Console("join(): No children\n");
+		return -2;
+	}
+	else {
+		procPtr child = Current->childProcPtr;
+		while (child != NULL) {
+			USLOSS_Console("Child pid = %d\n", child->pid);
+			if (child->status != QUIT) {
+				Current->status = BLOCKED;
+				USLOSS_Console("pid %d blocked at priority %d \n" , Current->pid, Current->priority - 1);
+				deq(&ReadyList[(Current->priority - 1)]); // remove from list
+				dispatcher();
+				*status = Current->childProcPtr->pid;
+				return Current->childProcPtr->pid;
+			}
+			else
+				child = child->nextSiblingPtr;
+		}
+	}
+	
+    return Current->childProcPtr->pid;  // -1 is not correct! Here to prevent warning.
 
 
     return -1;  // -1 is not correct! Here to prevent warning.
@@ -400,9 +423,8 @@ void quit(int status)
 
     Current->status = QUIT; // change status to QUIT
     Current->quitStatus = status; // store the given status
-
      if (DEBUG && debugflag)
-        USLOSS_Console("quit(): removing process from ready list...\n");
+        USLOSS_Console("quit(): removing process from ready list %d...\n", Current->priority-1);
     deq(&ReadyList[Current->priority-1]); // remove self from ready list
 
     // Below code commented out because current queue implementation would have it overwrite the nextProcPtrs which are used for the ready lists...

@@ -21,13 +21,13 @@ void dispatcher(void);
 void launch();
 static void checkDeadlock();
 void enableInterrupts(void);
-void requireKernalMode(char *);
+void requireKernelMode(char *);
 void clockHandler();
 
 /* -------------------------- Globals ------------------------------------- */
 
 // Patrick's debugging global variable...
-int debugflag = 1;
+int debugflag = 0;
 
 // the process table
 procStruct ProcTable[MAXPROC];
@@ -55,7 +55,7 @@ unsigned int nextPid = SENTINELPID;
 void startup()
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("startup()"); 
+    requireKernelMode("startup()"); 
 
     int result; // value returned by call to fork1()
 
@@ -68,22 +68,22 @@ void startup()
         ProcTable[i].status = UNUSED; // set status to be open
         ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
         ProcTable[i].nextProcPtr = NULL; // set pointers to null
-        ProcTable[i].childProcPtr = NULL;
         ProcTable[i].nextSiblingPtr = NULL;
-        //ProcTable[i].state =  NULL;
+        ProcTable[i].nextQuitSibling = NULL;
         ProcTable[i].startFunc = NULL;
         ProcTable[i].priority = -1;
         ProcTable[i].stack = NULL;
         ProcTable[i].stackSize = -1;
         ProcTable[i].parentPtr = NULL;
-        // initProcQueue(&ProcTable[i].quitChildren); // **not sure about this!
+        initProcQueue(&ProcTable[i].childrenQueue, CHILDREN); 
+        initProcQueue(&ProcTable[i].quitChildrenQueue, QUITCHILDREN); 
     }
 
     // Initialize the ReadyList, etc.
     if (DEBUG && debugflag)
         USLOSS_Console("startup(): initializing the Ready list\n");
     for (i = 0; i < SENTINELPRIORITY; i++) {
-        initProcQueue(&ReadyList[i]);
+        initProcQueue(&ReadyList[i], READYLIST);
     }
 
     // initialize current process pointer so that dispatcher doesn't have issues at startup
@@ -93,17 +93,17 @@ void startup()
     USLOSS_IntVec[USLOSS_CLOCK_INT] = clockHandler;
 
     // startup a sentinel process
-    // if (DEBUG && debugflag)
-    //     USLOSS_Console("startup(): calling fork1() for sentinel\n");
-    // result = fork1("sentinel", sentinel, NULL, USLOSS_MIN_STACK,
-    //                 SENTINELPRIORITY);
-    // if (result < 0) {
-    //     if (DEBUG && debugflag) {
-    //         USLOSS_Console("startup(): fork1 of sentinel returned error, ");
-    //         USLOSS_Console("halting...\n");
-    //     }
-    //     USLOSS_Halt(1);
-    // }
+    if (DEBUG && debugflag)
+        USLOSS_Console("startup(): calling fork1() for sentinel\n");
+    result = fork1("sentinel", sentinel, NULL, USLOSS_MIN_STACK,
+                    SENTINELPRIORITY);
+    if (result < 0) {
+        if (DEBUG && debugflag) {
+            USLOSS_Console("startup(): fork1 of sentinel returned error, ");
+            USLOSS_Console("halting...\n");
+        }
+        USLOSS_Halt(1);
+    }
   
     // start the test process
     if (DEBUG && debugflag)
@@ -132,29 +132,11 @@ void startup()
 void finish()
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("finish()"); 
+    requireKernelMode("finish()"); 
 
     if (DEBUG && debugflag)
         USLOSS_Console("in finish...\n");
 } /* finish */
-
-
-/* ------------------------------------------------------------------------
-   Author: Charlie Fractal
-   Name - requireKernalMode
-   Purpose - Checks if we are in kernal mode and prints an error messages
-              and halts USLOSS if not.
-              It should be called by every function in phase 1.
-   Parameters - The name of the function calling it, for the error message.
-   Side Effects - Prints and halts if we are not in kernal mode
-   ------------------------------------------------------------------------ */
-void requireKernalMode(char *name)
-{
-    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
-        USLOSS_Console("%s: Not in kernal mode. Halting...\n", name);
-        USLOSS_Halt(1); // from phase1 pdf
-    }
-} /* requireKernalMode */
 
 
 /* ------------------------------------------------------------------------
@@ -172,15 +154,14 @@ void requireKernalMode(char *name)
 int fork1(char *name, int (*startFunc)(char *), char *arg,
           int stacksize, int priority)
 {
-    disableInterrupts(); // disable interrupts?
-
     int procSlot = -1;
 
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): creating process %s\n", name);
 
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("fork1()"); 
+    requireKernelMode("fork1()"); 
+    disableInterrupts(); 
 
     // Return if stack size is too small
     if (stacksize < USLOSS_MIN_STACK) { // found in usloss.h
@@ -207,16 +188,17 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     }
 
     // find an empty slot in the process table
-    int i; // can't declare loop variables inside the loop because its not in C99 mode
-    for (i = 0; i < MAXPROC; i++) {
-        if (ProcTable[i].status == UNUSED) { // found an empty spot
-            procSlot = i;
-            break; 
-        }
-    }
+    procSlot = nextPid%MAXPROC;
+    // int i; // can't declare loop variables inside the loop because its not in C99 mode
+    // for (i = 0; i < MAXPROC; i++) {
+    //     if (ProcTable[i].status == UNUSED) { // found an empty spot
+    //         procSlot = i;
+    //         break; 
+    //     }
+    // }
 
     // handle case where there is no empty spot
-    if (procSlot < 0) {
+    if (ProcTable[procSlot].status != UNUSED) {
         USLOSS_Console("fork1(): No empty slot on the process table.\n");
         return -1;
     }
@@ -253,17 +235,14 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     ProcTable[procSlot].pid = nextPid++;
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): set process id to %d\n", ProcTable[procSlot].pid);
-	
-	// set the process priority
-	ProcTable[procSlot].priority = 1;
+    
+    // set the process priority
+    ProcTable[procSlot].priority = priority;
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): set process priority to %d\n", ProcTable[procSlot].priority);
 
     // Initialize context for this process, but use launch function pointer for
     // the initial value of the process's program counter (PC)
-    if (DEBUG && debugflag)
-        USLOSS_Console("fork1(): initializing context...\n");
-
     USLOSS_ContextInit(&(ProcTable[procSlot].state), USLOSS_PsrGet(),
                        ProcTable[procSlot].stack,
                        ProcTable[procSlot].stackSize,
@@ -277,33 +256,33 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     if (Current->pid > -1) {
         if (DEBUG && debugflag)
             USLOSS_Console("fork1(): adding child to parent's list of children...\n");
-        procPtr childSlot = Current->childProcPtr;
-        while (childSlot != NULL) {
-            childSlot = childSlot->nextSiblingPtr;
-        }
-        childSlot = &ProcTable[procSlot];
-		Current->childProcPtr = &ProcTable[procSlot]; // i don't know
-		Current->childProcPtr->priority = priority;
+        enq(&Current->childrenQueue, &ProcTable[procSlot]);
+        ProcTable[procSlot].parentPtr = Current; // set parent pointer
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): parent id: %d, child id: %d\n", ProcTable[procSlot].parentPtr->pid, peek(&Current->childrenQueue)->pid);
+
     }
 
     // add process to the approriate ready list
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): adding process to ready list %d...\n", priority);
     enq(&ReadyList[priority-1], &ProcTable[procSlot]);
-    USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
-    ProcTable[procSlot].status = READY;
+    if (DEBUG && debugflag)
+        USLOSS_Console("fork1(): ready list %d size = %d\n", priority-1, ReadyList[priority-1].size);
+    ProcTable[procSlot].status = READY; // set status to READY
 
     // let dispatcher decide which process runs next
+    if (startFunc != sentinel) { // don't dispatch sentinel!
     if (DEBUG && debugflag)
-        USLOSS_Console("fork1(): calling dispatcher...\n");
-    dispatcher(); 
+        USLOSS_Console("fork1(): calling dispatcher...\n\n");
+        dispatcher(); 
+    }
 
     // enable interrupts for the parent
     enableInterrupts();
 
     if (DEBUG && debugflag)
         USLOSS_Console("fork1(): returning...\n");
-	USLOSS_Console("fork1(): child priority %d\n", ProcTable[procSlot].priority);
     return ProcTable[procSlot].pid;  // return child's pid
 } /* fork1 */
 
@@ -319,7 +298,8 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 void launch()
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("launch()"); 
+    requireKernelMode("launch()"); 
+    disableInterrupts(); 
 
     int result;
 
@@ -330,7 +310,7 @@ void launch()
     enableInterrupts();
 
     if (DEBUG && debugflag)
-        USLOSS_Console("launch(): starting current process: %d\n", Current->pid);
+        USLOSS_Console("launch(): starting current process: %d\n\n", Current->pid);
 
     Current->status = RUNNING; // set status to RUNNING
 
@@ -360,37 +340,33 @@ void launch()
 int join(int *status)
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("join()"); 
+    requireKernelMode("join()"); 
+    disableInterrupts(); 
 
     if (DEBUG && debugflag)
         USLOSS_Console("join(): In join, pid = %d\n", Current->pid);
 
-	// check if has children
-	if (Current->childProcPtr == NULL) {
-		USLOSS_Console("join(): No children\n");
-		return -2;
-	}
-	else {
-		procPtr child = Current->childProcPtr;
-		while (child != NULL) {
-			USLOSS_Console("Child pid = %d\n", child->pid);
-			if (child->status != QUIT) {
-				Current->status = BLOCKED;
-				USLOSS_Console("pid %d blocked at priority %d \n" , Current->pid, Current->priority - 1);
-				deq(&ReadyList[(Current->priority - 1)]); // remove from list
-				dispatcher();
-				*status = Current->childProcPtr->pid;
-				return Current->childProcPtr->pid;
-			}
-			else
-				child = child->nextSiblingPtr;
-		}
-	}
-	
-    return Current->childProcPtr->pid;  // -1 is not correct! Here to prevent warning.
+    // check if has children
+    if (Current->childrenQueue.size == 0) {
+        USLOSS_Console("join(): No children\n");
+        return -2;
+    }
 
+    // if current has no quit children, block self and wait.
+    if (Current->quitChildrenQueue.size == 0) {
+        Current->status = BLOCKED;
+        if (DEBUG && debugflag)
+            USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
+        deq(&ReadyList[(Current->priority - 1)]); // remove from list
+        dispatcher();    
+    }
 
-    return -1;  // -1 is not correct! Here to prevent warning.
+    // get the earliest quit child
+    procPtr child = deq(&Current->quitChildrenQueue);
+    if (DEBUG && debugflag)
+        USLOSS_Console("Found quit child pid = %d, status = %d\n\n", child->pid, child->quitStatus);
+    *status = child->quitStatus;
+    return child->pid;
 } /* join */
 
 
@@ -406,35 +382,44 @@ int join(int *status)
 void quit(int status)
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("quit()"); 
+    requireKernelMode("quit()"); 
+    disableInterrupts(); 
 
-    if (DEBUG && debugflag)
-        USLOSS_Console("quit(): in quit for process pid = %d\n", Current->pid);
+    p1_quit(Current->pid);
 
     // print error message and halt if process with active children calls quit
     // loop though children to find if any are active
-    procPtr childPtr = Current->childProcPtr;
+    procPtr childPtr = peek(&Current->childrenQueue);
     while (childPtr != NULL) {
         if (childPtr->status != QUIT) {
             USLOSS_Console("quit(): Error: Process has active children.  Halting...\n");
             USLOSS_Halt(1);
         }
+        childPtr = childPtr->nextSiblingPtr;
     }
 
     Current->status = QUIT; // change status to QUIT
     Current->quitStatus = status; // store the given status
      if (DEBUG && debugflag)
-        USLOSS_Console("quit(): removing process from ready list %d...\n", Current->priority-1);
+        USLOSS_Console("quit(): removing process id %d from ready list %d...\n", Current->pid, Current->priority-1);
     deq(&ReadyList[Current->priority-1]); // remove self from ready list
 
-    // Below code commented out because current queue implementation would have it overwrite the nextProcPtrs which are used for the ready lists...
-    // if (DEBUG && debugflag)
-    //     USLOSS_Console("quit(): adding process to parent's list if quit children...\n");
-    // enq(Current->parentPtr.quitChildren, Current); // add self to parent's quit children list
+    if (Current->parentPtr != NULL) {
+        if (DEBUG && debugflag)
+            USLOSS_Console("quit(): adding process to parent's list if quit children...\n\n");
+        enq(&Current->parentPtr->quitChildrenQueue, Current); // add self to parent's quit children list
+
+        if (Current->parentPtr->status == BLOCKED) { // unblock parent
+            Current->parentPtr->status = READY;
+            enq(&ReadyList[Current->parentPtr->priority-1], Current->parentPtr);
+        }
+    }
 
     // to do later: unblock processes that zap'd this process
 
-    p1_quit(Current->pid);
+    // remove any quit children current has form the process table
+
+    dispatcher(); // call dispatcher to run next process
 } /* quit */
 
 
@@ -451,7 +436,8 @@ void quit(int status)
 void dispatcher(void)
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("dispatcher()"); 
+    requireKernelMode("dispatcher()"); 
+    disableInterrupts(); 
 
     procPtr nextProcess = NULL;
 
@@ -471,7 +457,7 @@ void dispatcher(void)
     }
 
     if (DEBUG && debugflag)
-        USLOSS_Console("dispatcher(): next process is %s\n", nextProcess->name);
+        USLOSS_Console("dispatcher(): next process is %s\n\n", nextProcess->name);
 
     // update current
     procPtr old = Current;
@@ -484,9 +470,6 @@ void dispatcher(void)
     p1_switch(old->pid, nextProcess->pid);
     enableInterrupts();
     USLOSS_ContextSwitch(&old->state, &nextProcess->state);
-
-    if (DEBUG && debugflag)
-        USLOSS_Console("dispatcher(): called USLOSS_ContextSwitch, Current = \n", Current->name);
 } /* dispatcher */
 
 
@@ -504,7 +487,7 @@ void dispatcher(void)
 int sentinel (char *dummy)
 {
     // test if in kernel mode; halt if in user mode
-    requireKernalMode("sentinel()"); 
+    requireKernelMode("sentinel()"); 
 
     if (DEBUG && debugflag)
         USLOSS_Console("sentinel(): called\n");
@@ -522,6 +505,17 @@ static void checkDeadlock()
     if (DEBUG && debugflag)
         USLOSS_Console("checkDeadlock(): called\n");
 
+    // check if all processes have quit
+    int i;
+    for (i = 0; i < MAXPROC; i++) { 
+        if (ProcTable[i].status != QUIT && ProcTable[i].status != UNUSED && ProcTable[i].startFunc != sentinel) {
+            USLOSS_Console("checkDeadlock(): Processes remain. Abnormal termination. \n");
+            USLOSS_Halt(1);
+        }
+    }
+
+    USLOSS_Console("All processes completed.\n");
+    USLOSS_Halt(0);
 } /* checkDeadlock */
 
 
@@ -558,18 +552,6 @@ void disableInterrupts()
             USLOSS_Console("Interrupts disabled.\n");
 } /* disableInterrupts */
 
-void printBits(unsigned int n) {
-    while (n) {
-        if (n & 1)
-            USLOSS_Console("1");
-        else
-            USLOSS_Console("0");
-
-        n >>= 1;
-    }
-    USLOSS_Console("\n");
-}
-
 
 /*
  * Enables the interrupts.
@@ -582,18 +564,29 @@ void enableInterrupts()
         USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
         USLOSS_Console("enable interrupts\n");
         USLOSS_Halt(1);
-    } else {
-        unsigned int newPSR = USLOSS_PsrGet();
-        newPSR |= 1 << 1; // set bit 1 to 1
-        USLOSS_Console("enableInterrupts(): PSR before: "); 
-        printBits(USLOSS_PsrGet());
-        USLOSS_PsrSet(newPSR);
-        USLOSS_Console("enableInterrupts(): PSR after: ");    
-        printBits(USLOSS_PsrGet());
+    } else
+        // We ARE in kernel mode
+        USLOSS_PsrSet( USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT );
         if (DEBUG && debugflag)
             USLOSS_Console("Interrupts enabled.\n");
-    }
 } /* enableInterrupts */
+
+
+/* ------------------------------------------------------------------------
+   Name - requireKernelMode
+   Purpose - Checks if we are in kernel mode and prints an error messages
+              and halts USLOSS if not.
+              It should be called by every function in phase 1.
+   Parameters - The name of the function calling it, for the error message.
+   Side Effects - Prints and halts if we are not in kernel mode
+   ------------------------------------------------------------------------ */
+void requireKernelMode(char *name)
+{
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
+        USLOSS_Console("%s: Not in kernel mode. Halting...\n", name);
+        USLOSS_Halt(1); // from phase1 pdf
+    }
+} /* requireKernelMode */
 
 
 /* ------------------------------------------------------------------------

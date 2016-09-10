@@ -5,9 +5,22 @@ typedef struct procStruct procStruct;
 
 typedef struct procStruct * procPtr;
 
+/* Queue struct for the Ready Lists */
+typedef struct procQueue procQueue;
+#define READYLIST 0
+#define CHILDREN 1
+#define QUITCHILDREN 2
+
+struct procQueue {
+	procPtr head;
+	procPtr tail;
+	int 	size;
+	int 	type; // either ready list (uses nextProcPtr) or quit children (uses nextQuitSibling)
+};
+
+/* Process struct */
 struct procStruct {
 	procPtr         nextProcPtr;
-	procPtr         childProcPtr;
 	procPtr         nextSiblingPtr;
 	char            name[MAXNAME];     /* process's name */
 	char            startArg[MAXARG];  /* args passed to process */
@@ -20,8 +33,10 @@ struct procStruct {
 	int             status;        /* READY, BLOCKED, QUIT, etc. */
 	/* other fields as needed... */
 	procPtr         parentPtr;
+	procQueue 		childrenQueue;  /* queue of the process's children */
 	int 			quitStatus;		/* whatever the process returns when it quits */
-	// procQueue		quitChildren;	/* list of children who have quit in the order they have quit */
+	procQueue		quitChildrenQueue;	/* list of children who have quit in the order they have quit */
+	procPtr 		nextQuitSibling;
 };
 
 /* process statuses */
@@ -51,62 +66,64 @@ union psrValues {
 #define SENTINELPID 1
 #define SENTINELPRIORITY (MINPRIORITY + 1)
 
-/* Queue struct for the Ready Lists */
-typedef struct procQueue procQueue;
-
-struct procQueue {
-	procPtr head;
-	procPtr tail;
-	int size;
-};
-
 /* Initialize the given procQueue */
-void initProcQueue(procQueue* q) {
+void initProcQueue(procQueue* q, int type) {
 	q->head = NULL;
 	q->tail = NULL;
 	q->size = 0;
+	q->type = type;
 }
 
 /* Add the given procPtr to the back of the given queue. */
 void enq(procQueue* q, procPtr p) {
-	USLOSS_Console("enquing process id %d\n", p->pid);
+	// USLOSS_Console("enquing process id %d\n", p->pid);
 	if (q->head == NULL && q->tail == NULL) {
 		q->head = q->tail = p;
 	} else {
-		q->tail->nextProcPtr = p;
+		if (q->type == READYLIST)
+			q->tail->nextProcPtr = p;
+		else if (q->type == CHILDREN)
+			q->tail->nextSiblingPtr = p;
+		else
+			q->tail->nextQuitSibling = p;
 		q->tail = p;
 	}
 	q->size++;
-	USLOSS_Console("head = %s\n", q->head->name);
-	USLOSS_Console("tail = %s\n", q->tail->name);
-	USLOSS_Console("size = %d\n", q->size);
+	// USLOSS_Console("head = %s\n", q->head->name);
+	// USLOSS_Console("tail = %s\n", q->tail->name);
+	// USLOSS_Console("size = %d\n", q->size);
 }
 
 /* Remove and return the head of the given queue. */
 procPtr deq(procQueue* q) {
 	procPtr temp = q->head;
 	if (q->head == NULL) {
-		printf("Empty Queue\n");
+		// printf("Empty Queue\n");
 		return NULL;
 	}
-	USLOSS_Console("dequing process id %d\n", q->head->pid);
+	// USLOSS_Console("dequing process id %d\n", q->head->pid);
 	if (q->head == q->tail) {
 		q->head = q->tail = NULL; 
 	}
 	else {
-		q->head = q->head->nextProcPtr;  
-		USLOSS_Console("head = %s\n", q->head->name);
-		USLOSS_Console("tail = %s\n", q->tail->name);
+		if (q->type == READYLIST)
+			q->head = q->head->nextProcPtr;  
+		else if (q->type == CHILDREN)
+			q->head = q->head->nextSiblingPtr;  
+		else 
+			q->head = q->head->nextQuitSibling;  
+		// USLOSS_Console("head = %s\n", q->head->name);
+		// USLOSS_Console("tail = %s\n", q->tail->name);
 	}
 	q->size--;
-	USLOSS_Console("size = %d\n", q->size);
+	// USLOSS_Console("size = %d\n", q->size);
 	return temp;
 }
 
 /* Return the head of the given queue. */
 procPtr peek(procQueue* q) {
 	if (q->head == NULL) {
-		printf("Empty Queue\n");
+		// printf("Empty Queue\n");
 		return NULL;
 	}
 	return q->head;   

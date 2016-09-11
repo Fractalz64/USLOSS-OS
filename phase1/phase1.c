@@ -188,14 +188,14 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     }
 
     // find an empty slot in the process table
-    procSlot = nextPid%MAXPROC;
-    // int i; // can't declare loop variables inside the loop because its not in C99 mode
-    // for (i = 0; i < MAXPROC; i++) {
-    //     if (ProcTable[i].status == UNUSED) { // found an empty spot
-    //         procSlot = i;
-    //         break; 
-    //     }
-    // }
+    // procSlot = nextPid%MAXPROC;
+     int i; // can't declare loop variables inside the loop because its not in C99 mode
+     for (i = 0; i < MAXPROC; i++) {
+         if (ProcTable[i].status == UNUSED) { // found an empty spot
+             procSlot = i;
+             break; 
+         }
+     }
 
     // handle case where there is no empty spot
     if (ProcTable[procSlot].status != UNUSED) {
@@ -277,6 +277,7 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
         USLOSS_Console("fork1(): calling dispatcher...\n\n");
         dispatcher(); 
     }
+	USLOSS_Console("%d Procslot\n", procSlot);
 
     // enable interrupts for the parent
     enableInterrupts();
@@ -366,6 +367,11 @@ int join(int *status)
     if (DEBUG && debugflag)
         USLOSS_Console("Found quit child pid = %d, status = %d\n\n", child->pid, child->quitStatus);
     *status = child->quitStatus;
+	
+	if (child != NULL)
+		ProcTable[(child->pid - 1) % MAXPROC].status = UNUSED;
+	//USLOSS_Console("%d set unused\n", (child->pid - 1) % MAXPROC);
+	
     return child->pid;
 } /* join */
 
@@ -392,7 +398,8 @@ void quit(int status)
     procPtr childPtr = peek(&Current->childrenQueue);
     while (childPtr != NULL) {
         if (childPtr->status != QUIT) {
-            USLOSS_Console("quit(): Error: Process has active children.  Halting...\n");
+            USLOSS_Console("quit(): Error: Process %s has active children.  Halting...\n", Current->name);
+			USLOSS_Console("quit(): Error: Child Name: %s status: %d", childPtr->name, childPtr->status);
             USLOSS_Halt(1);
         }
         childPtr = childPtr->nextSiblingPtr;
@@ -587,7 +594,60 @@ void requireKernelMode(char *name)
         USLOSS_Halt(1); // from phase1 pdf
     }
 } /* requireKernelMode */
+/* ------------------------------------------------------------------------
+   Name - zap
+   Purpose - 
+   Parameters - 
+   Returns -  
+   Side Effects - 
+   ----------------------------------------------------------------------- */
+/*int zap(int pid) {
+	int i;
+    for (i = 0; i < SENTINELPRIORITY; i++) {
+        if (ReadyList[i].size > 0) {
+            nextProcess = peek(&ReadyList[i]);
+            break;
+        }
+		
+		for (i = 0; i < MAXPROC; i++) {
+			ProcTable[i].status = UNUSED; // set status to be open
+			ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
+			ProcTable[i].nextProcPtr = NULL; // set pointers to null
+			ProcTable[i].nextSiblingPtr = NULL;
+			ProcTable[i].nextQuitSibling = NULL;
+			ProcTable[i].startFunc = NULL;
+			ProcTable[i].priority = -1;
+			ProcTable[i].stack = NULL;
+			ProcTable[i].stackSize = -1;
+			ProcTable[i].parentPtr = NULL;
+			initProcQueue(&ProcTable[i].childrenQueue, CHILDREN); 
+			initProcQueue(&ProcTable[i].quitChildrenQueue, QUITCHILDREN); 
+    	}
+    }
+} */
 
+/* ------------------------------------------------------------------------
+   Name - isZapped
+   Purpose - 
+   Parameters - 
+   Returns -  
+   Side Effects - 
+   ----------------------------------------------------------------------- */
+int isZapped() {
+	
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - getpid
+   Purpose - return pid
+   Parameters - none
+   Returns - current process pid
+   Side Effects - ^
+   ----------------------------------------------------------------------- */
+int getpid() {
+	return Current->pid;	
+}
 
 /* ------------------------------------------------------------------------
    Name - dumpProcesses
@@ -599,11 +659,19 @@ void requireKernelMode(char *name)
    ----------------------------------------------------------------------- */
 void dumpProcesses()
 {
+	//PID	Parent	Priority	Status		# Kids	CPUtime	Name
     int i;
+	USLOSS_Console("%s%10s%10s%10s%10s%10s%10s\n", "PID", "NAME", "PARENT", 
+				   "PRIORITY", "STATUS", "#KIDS", "CPU_TIME");
     for (i = 0; i < MAXPROC; i++) {
-        USLOSS_Console("PID: %d\n", ProcTable[i].pid);
-        USLOSS_Console("Name: %s\n", ProcTable[i].name);
-        USLOSS_Console("Priority: %d\n", ProcTable[i].priority);
-        USLOSS_Console("Status: %d\n", ProcTable[i].status);
+		int p;
+		if (ProcTable[i].parentPtr != NULL)
+			p = ProcTable[i].parentPtr->pid;
+		else
+			p = -999;
+		USLOSS_Console("%3d%10s%10d%10d%10d%10d%10d\n", ProcTable[i].pid, 
+					   ProcTable[i].name, p,
+					   ProcTable[i].priority, ProcTable[i].status, 
+					   ProcTable[i].childrenQueue.size, -1);
     }
 }

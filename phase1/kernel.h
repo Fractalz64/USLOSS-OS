@@ -38,10 +38,14 @@ struct procStruct {
 	procQueue		quitChildrenQueue;	/* list of children who have quit in the order they have quit */
 	procPtr 		nextQuitSibling;
 	int				zapStatus; // 1 zapped; 0 not zapped
+	int 			timeStarted; // the time the current time slice started
+	int 			cpuTime; // the total amount of time the process has been running	
 };
 
+#define TIMESLICE 80
+
 /* process statuses */
-#define UNUSED 0
+#define EMPTY 0
 #define READY 1
 #define RUNNING 2
 #define BLOCKED 3
@@ -119,6 +123,30 @@ procPtr deq(procQueue* q) {
 	q->size--;
 	// USLOSS_Console("size = %d\n", q->size);
 	return temp;
+}
+
+/* Remove the child process with the given pid from the queue */
+void qRemoveChild(procQueue* q, int pid) {
+	if (q->head == 	NULL || q->type != CHILDREN)
+		return;
+
+	if (q->head->pid == pid) {
+		deq(q);
+		return;
+	}
+
+	procPtr prev = q->head;
+	procPtr p = q->head->nextSiblingPtr;
+
+	while (p != NULL) {
+		if (p->pid == pid) {
+			if (p == q->tail)
+				q->tail = prev;
+			else
+				prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
+			q->size--;
+		}
+	}
 }
 
 /* Return the head of the given queue. */

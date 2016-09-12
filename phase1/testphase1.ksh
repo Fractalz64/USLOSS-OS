@@ -19,7 +19,7 @@ fi
 
 if  make test${num} 
 then
-    test${num} > test${num}.txt 2> test${num}stderr.txt;
+    ./test${num} > test${num}.txt 2> test${num}stderr.txt;
     if [ -s test${num}stderr.txt ]
     then
         cat test${num}stderr.txt >> test${num}.txt

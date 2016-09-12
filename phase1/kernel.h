@@ -37,6 +37,7 @@ struct procStruct {
 	int 			quitStatus;		/* whatever the process returns when it quits */
 	procQueue		quitChildrenQueue;	/* list of children who have quit in the order they have quit */
 	procPtr 		nextQuitSibling;
+	int				zapStatus; // 1 zapped; 0 not zapped
 };
 
 /* process statuses */

@@ -9,13 +9,13 @@ typedef struct procStruct * procPtr;
 typedef struct procQueue procQueue;
 #define READYLIST 0
 #define CHILDREN 1
-#define QUITCHILDREN 2
+#define DEADCHILDREN 2
 
 struct procQueue {
 	procPtr head;
 	procPtr tail;
 	int 	size;
-	int 	type; // either ready list (uses nextProcPtr) or quit children (uses nextQuitSibling)
+	int 	type; // either ready list (uses nextProcPtr) or dead children (uses nextDeadSibling)
 };
 
 /* Process struct */
@@ -35,8 +35,8 @@ struct procStruct {
 	procPtr         parentPtr;
 	procQueue 		childrenQueue;  /* queue of the process's children */
 	int 			quitStatus;		/* whatever the process returns when it quits */
-	procQueue		quitChildrenQueue;	/* list of children who have quit in the order they have quit */
-	procPtr 		nextQuitSibling;
+	procQueue		deadChildrenQueue;	/* list of children who have quit in the order they have quit */
+	procPtr 		nextDeadSibling;
 	int				zapStatus; // 1 zapped; 0 not zapped
 	int 			timeStarted; // the time the current time slice started
 	int 			cpuTime; // the total amount of time the process has been running	
@@ -90,7 +90,7 @@ void enq(procQueue* q, procPtr p) {
 		else if (q->type == CHILDREN)
 			q->tail->nextSiblingPtr = p;
 		else
-			q->tail->nextQuitSibling = p;
+			q->tail->nextDeadSibling = p;
 		q->tail = p;
 	}
 	q->size++;
@@ -116,7 +116,7 @@ procPtr deq(procQueue* q) {
 		else if (q->type == CHILDREN)
 			q->head = q->head->nextSiblingPtr;  
 		else 
-			q->head = q->head->nextQuitSibling;  
+			q->head = q->head->nextDeadSibling;  
 		// USLOSS_Console("head = %s\n", q->head->name);
 		// USLOSS_Console("tail = %s\n", q->tail->name);
 	}

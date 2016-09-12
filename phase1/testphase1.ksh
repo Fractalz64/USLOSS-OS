@@ -1,7 +1,7 @@
 #!/bin/ksh
 
 #resultsDirectory="/home/cs452/fall16/phase1/testResults"
-resultsDirectory="/home/cs452/fall16/admin/project/phase1/testResults"
+resultsDirectory="/home/dfdonfei/phase1/phase1/testResults"
 #resultsDirectory="/Users/patrick/Classes/452/project/phase1/testResults"
 
 if [ "$#" -eq 0 ] 

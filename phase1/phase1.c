@@ -65,19 +65,7 @@ void startup()
     int i; // can't declare loop variables inside the loop because its not in C99 mode
     // init the fields of each process
     for (i = 0; i < MAXPROC; i++) {
-        ProcTable[i].status = UNUSED; // set status to be open
-        ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
-        ProcTable[i].nextProcPtr = NULL; // set pointers to null
-        ProcTable[i].nextSiblingPtr = NULL;
-        ProcTable[i].nextQuitSibling = NULL;
-        ProcTable[i].startFunc = NULL;
-        ProcTable[i].priority = -1;
-        ProcTable[i].stack = NULL;
-        ProcTable[i].stackSize = -1;
-        ProcTable[i].parentPtr = NULL;
-        initProcQueue(&ProcTable[i].childrenQueue, CHILDREN); 
-        initProcQueue(&ProcTable[i].quitChildrenQueue, QUITCHILDREN); 
-		ProcTable[i].zapStatus = 0;
+        emptyProc(i);
     }
 
     // Initialize the ReadyList, etc.
@@ -343,7 +331,7 @@ int join(int *status)
     // test if in kernel mode; halt if in user mode
     requireKernelMode("join()"); 
     disableInterrupts(); 
-
+	
     if (DEBUG && debugflag)
         USLOSS_Console("join(): In join, pid = %d\n", Current->pid);
 
@@ -369,6 +357,7 @@ int join(int *status)
     *status = child->quitStatus;
 	
 	if (child->status == QUIT) {
+		//emptyProc((child->pid-1)%MAXPROC);
 		ProcTable[(child->pid - 1) % MAXPROC].status = UNUSED;
 		deq(&Current->childrenQueue);
 	}
@@ -591,17 +580,44 @@ void enableInterrupts()
 void requireKernelMode(char *name)
 {
     if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
-        USLOSS_Console("%s: Not in kernel mode. Halting...\n", name);
+		//Called while in user mode, by process 2. Halting...
+        USLOSS_Console("%s: Called while in user mode, by process %d. Halting...\n", 
+					   name, Current->pid);
         USLOSS_Halt(1); // from phase1 pdf
     }
 } /* requireKernelMode */
 
+/* ------------------------------------------------------------------------
+   Name - newProc
+   Purpose - remove process from process table
+   Parameters - 
+   Returns -  
+   Side Effects - 
+   ----------------------------------------------------------------------- */
+void emptyProc(int i) {
+	ProcTable[i].status = UNUSED; // set status to be open
+	ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
+	ProcTable[i].nextProcPtr = NULL; // set pointers to null
+	ProcTable[i].nextSiblingPtr = NULL;
+	ProcTable[i].nextQuitSibling = NULL;
+	ProcTable[i].startFunc = NULL;
+	ProcTable[i].priority = -1;
+	ProcTable[i].stack = NULL;
+	ProcTable[i].stackSize = -1;
+	ProcTable[i].parentPtr = NULL;
+	initProcQueue(&ProcTable[i].childrenQueue, CHILDREN); 
+	initProcQueue(&ProcTable[i].quitChildrenQueue, QUITCHILDREN); 
+	ProcTable[i].zapStatus = 0;
+	
+	//USLOSS_Console("Emptied %d", i);
+}
 
 /* ------------------------------------------------------------------------
    Name - zap
    Purpose - 
    Parameters - 
-   Returns -  
+   Returns -  -1: the calling process itself was zapped while in zap.
+0: the zapped process has called quit.
    Side Effects - 
    ----------------------------------------------------------------------- */
 int zap(int pid) {
@@ -616,18 +632,21 @@ int zap(int pid) {
 		if (ProcTable[i].pid == pid) {
 			ProcTable[i].zapStatus = 1;
 			process = &ProcTable[i];
+			Current->status = BLOCKED;
+			deq(&ReadyList[(Current->priority - 1)]);
+			//dumpProcesses();
+			dispatcher();
 		}	
 	}
 	
-	while(1) {
-		if (Current->zapStatus == 1) 
-			return -1;
-		if (process->status == QUIT) 
-			return 0;
+	if (process->status == QUIT) {
+		Current->status = READY;
+		enq(&ReadyList[Current->priority-1], Current);
+		return 0;
 	}
-	
-	
-	
+	if (Current->zapStatus == 1) {
+		return -1;	
+	}
 } 
 
 /* ------------------------------------------------------------------------
@@ -653,6 +672,35 @@ int getpid() {
 	return Current->pid;	
 }
 
+/*
+int blockMe(int newStatus);
+This operation will block the calling process. newStatus is the value used to indicate
+the status of the process in the dumpProcesses command. newStatus must be greater
+than 10; if it is not, then halt USLOSS with an appropriate error message.
+Return values:
+-1: if process was zapped while blocked.
+0: otherwise.
+*/
+int blockMe(int newStatus) {
+	if (newStatus < 10) {
+		USLOSS_Console("newStatus < 10 \n");
+		USLOSS_Halt(1);
+	}
+	Current->status = newStatus;
+	
+	if (Current->zapStatus == 1) {
+		return -1;	
+	}
+	
+	return 0;
+}
+
+
+
+int unblockProc(int pid) {
+	return 0;
+}
+
 /* ------------------------------------------------------------------------
    Name - dumpProcesses
    Purpose - Prints information about each process on the process table,
@@ -661,6 +709,7 @@ int getpid() {
    Returns - nothing
    Side Effects - none
    ----------------------------------------------------------------------- */
+
 void dumpProcesses()
 {
 	//PID	Parent	Priority	Status		# Kids	CPUtime	Name

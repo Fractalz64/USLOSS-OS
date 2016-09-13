@@ -25,6 +25,7 @@ void requireKernelMode(char *);
 void clockHandler();
 int readtime();
 void emptyProc(int);
+int block(int);
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -73,6 +74,7 @@ void startup()
     }
 
     numProcs = 0;
+    Current = &ProcTable[MAXPROC-1];
 
     // Initialize the ReadyList, etc.
     if (DEBUG && debugflag)
@@ -80,9 +82,6 @@ void startup()
     for (i = 0; i < SENTINELPRIORITY; i++) {
         initProcQueue(&ReadyList[i], READYLIST);
     }
-
-    // initialize current process pointer so that dispatcher doesn't have issues at startup
-    Current = &ProcTable[MAXPROC-1]; 
 
     // Initialize the clock interrupt handler
     USLOSS_IntVec[USLOSS_CLOCK_INT] = clockHandler;
@@ -282,14 +281,11 @@ void launch()
 
     int result;
 
-    // Enable interrupts
-    enableInterrupts();
-
     if (DEBUG && debugflag)
         USLOSS_Console("launch(): starting current process: %d\n\n", Current->pid);
 
-    Current->status = RUNNING; // set status to RUNNING
-    Current->timeStarted = USLOSS_Clock(); // set time started
+    // Enable interrupts
+    enableInterrupts();
 
     // Call the function passed to fork1, and capture its return value
     result = Current->startFunc(Current->startArg);
@@ -299,112 +295,6 @@ void launch()
 
     quit(result);
 } /* launch */
-
-
-/* ------------------------------------------------------------------------
-   Name - join
-   Purpose - Wait for a child process (if one has been forked) to quit.  If 
-             one has already quit, don't wait.
-   Parameters - a pointer to an int where the termination code of the 
-                quitting process is to be stored.
-   Returns - the process id of the quitting child joined on.
-             -1 if the process was zapped in the join
-             -2 if the process has no children
-   Side Effects - If no child process has quit before join is called, the 
-                  parent is removed from the ready list and blocked.
-   ------------------------------------------------------------------------ */
-int join(int *status)
-{
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("join()"); 
-    disableInterrupts(); 
-	
-    if (DEBUG && debugflag)
-        USLOSS_Console("join(): In join, pid = %d\n", Current->pid);
-
-    // check if has children
-    if (Current->childrenQueue.size == 0) {
-        USLOSS_Console("join(): No children\n");
-        return -2;
-    }
-
-    // if current has no dead children, block self and wait.
-    if (Current->deadChildrenQueue.size == 0) {
-        Current->status = BLOCKED;
-        if (DEBUG && debugflag)
-            USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
-        deq(&ReadyList[(Current->priority - 1)]); // remove from list
-        dispatcher();    
-    }
-
-    // get the earliest dead child
-    procPtr child = deq(&Current->deadChildrenQueue);
-    *status = child->quitStatus;
-    int childPid = child->pid;
-
-    // put child to rest
-    qRemoveChild(&Current->childrenQueue, childPid); 
-    emptyProc(childPid);
-	
-    return childPid;
-} /* join */
-
-
-/* ------------------------------------------------------------------------
-   Name - quit
-   Purpose - Stops the child process and notifies the parent of the death by
-             putting child quit info on the parents child completion code
-             list.
-   Parameters - the code to return to the grieving parent
-   Returns - nothing
-   Side Effects - changes the parent of pid child completion status list.
-   ------------------------------------------------------------------------ */
-void quit(int status)
-{
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("quit()"); 
-    disableInterrupts(); 
-
-    if (DEBUG && debugflag)
-        USLOSS_Console("quit(): quitting process pid = %d\n", Current->pid);
-
-    // print error message and halt if process with active children calls quit
-    // loop though children to find if any are active
-    procPtr childPtr = peek(&Current->childrenQueue);
-    while (childPtr != NULL) {
-        if (childPtr->status != QUIT) {
-            USLOSS_Console("quit(): Error: Process %s has active children.  Halting...\n", Current->name);
-			USLOSS_Console("quit(): Error: Child Name: %s status: %d\n", childPtr->name, childPtr->status);
-            USLOSS_Halt(1);
-        }
-        childPtr = childPtr->nextSiblingPtr;
-    }
-
-    Current->status = QUIT; // change status to QUIT
-    Current->quitStatus = status; // store the given status
-    deq(&ReadyList[Current->priority-1]); // remove self from ready list
-
-    if (Current->parentPtr != NULL) {
-        enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
-
-        if (Current->parentPtr->status == BLOCKED) { // unblock parent
-            Current->parentPtr->status = READY;
-            enq(&ReadyList[Current->parentPtr->priority-1], Current->parentPtr);
-        }
-    }
-
-    // to do later: unblock processes that zap'd this process
-
-    // remove any dead children current has form the process table
-    while (Current->deadChildrenQueue.size > 0) {
-        procPtr child = deq(&Current->deadChildrenQueue);
-        emptyProc(child->pid);
-    }
-
-    p1_quit(Current->pid);
-
-    dispatcher(); // call dispatcher to run next process
-} /* quit */
 
 
 /* ------------------------------------------------------------------------
@@ -447,14 +337,121 @@ void dispatcher(void)
     procPtr old = Current;
     Current = nextProcess;
 
+    Current->status = RUNNING; // set status to RUNNING
+    Current->sliceTime = 0;
+    Current->timeStarted = USLOSS_Clock(); // set time started
+
     // your dispatcher should call p1_switch(int old, int new) with the 
     // PID’s of the process that was previously running and the next process to run. 
     // You will enable interrupts before you call USLOSS_ContextSwitch. 
     // The call to p1_switch should be called just before you enable interrupts
-    p1_switch(old->pid, nextProcess->pid);
+    p1_switch(old->pid, Current->pid);
     enableInterrupts();
-    USLOSS_ContextSwitch(&old->state, &nextProcess->state);
+    USLOSS_ContextSwitch(&old->state, &Current->state);
 } /* dispatcher */
+
+
+/* ------------------------------------------------------------------------
+   Name - join
+   Purpose - Wait for a child process (if one has been forked) to quit.  If 
+             one has already quit, don't wait.
+   Parameters - a pointer to an int where the termination code of the 
+                quitting process is to be stored.
+   Returns - the process id of the quitting child joined on.
+             -1 if the process was zapped in the join
+             -2 if the process has no children
+   Side Effects - If no child process has quit before join is called, the 
+                  parent is removed from the ready list and blocked.
+   ------------------------------------------------------------------------ */
+int join(int *status)
+{
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("join()"); 
+    disableInterrupts(); 
+	
+    if (DEBUG && debugflag)
+        USLOSS_Console("join(): In join, pid = %d\n", Current->pid);
+
+    // check if has children
+    if (Current->childrenQueue.size == 0) {
+        USLOSS_Console("join(): No children\n");
+        return -2;
+    }
+
+    // if current has no dead children, block self and wait.
+    if (Current->deadChildrenQueue.size == 0) {
+        block(BLOCKED);
+        if (DEBUG && debugflag)
+            USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
+    }
+
+    // get the earliest dead child
+    procPtr child = deq(&Current->deadChildrenQueue);
+    *status = child->quitStatus;
+    int childPid = child->pid;
+
+    // put child to rest
+    qRemoveChild(&Current->childrenQueue, childPid); 
+    emptyProc(childPid);
+	
+    return childPid;
+} /* join */
+
+
+/* ------------------------------------------------------------------------
+   Name - quit
+   Purpose - Stops the child process and notifies the parent of the death by
+             putting child quit info on the parents child completion code
+             list.
+   Parameters - the code to return to the grieving parent
+   Returns - nothing
+   Side Effects - changes the parent of pid child completion status list.
+   ------------------------------------------------------------------------ */
+void quit(int status)
+{
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("quit()"); 
+    disableInterrupts(); 
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("quit(): quitting process pid = %d\n", Current->pid);
+
+    // print error message and halt if process with active children calls quit
+    // loop though children to find if any are active
+    procPtr childPtr = peek(&Current->childrenQueue);
+    while (childPtr != NULL) {
+        if (childPtr->status != QUIT) {
+            USLOSS_Console("quit(): process %d, '%s', has active children. Halting...\n", Current->pid, Current->name);
+            USLOSS_Halt(1);
+        }
+        childPtr = childPtr->nextSiblingPtr;
+    }
+
+    Current->status = QUIT; // change status to QUIT
+    Current->quitStatus = status; // store the given status
+    deq(&ReadyList[Current->priority-1]); // remove self from ready list
+
+    if (Current->parentPtr != NULL) {
+        enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
+
+        if (Current->parentPtr->status == BLOCKED) { // unblock parent
+            Current->parentPtr->status = READY;
+            enq(&ReadyList[Current->parentPtr->priority-1], Current->parentPtr);
+        }
+    }
+
+    // to do later: unblock processes that zap'd this process
+
+    // remove any dead children current has form the process table
+    while (Current->deadChildrenQueue.size > 0) {
+        procPtr child = deq(&Current->deadChildrenQueue);
+        emptyProc(child->pid);
+    }
+
+    p1_quit(Current->pid);
+
+    dispatcher(); // call dispatcher to run next process
+} /* quit */
 
 
 /* ------------------------------------------------------------------------
@@ -510,24 +507,7 @@ static void checkDeadlock()
    ----------------------------------------------------------------------- */
 void clockHandler(int dev, int unit)
 {
-    if (DEBUG && debugflag)
-        USLOSS_Console("clockHandler(): called\n");
-
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("clockHandler()"); 
-
-    disableInterrupts();
-   
-    if (readtime() >= TIMESLICE) { // current has exceeded its timeslice
-        if (DEBUG && debugflag)
-            USLOSS_Console("clockHandler(): time slicing\n");
-        deq(&ReadyList[Current->priority-1]); // remove current from ready list
-        Current->status = READY; 
-        enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
-        dispatcher();
-    }
-
-    enableInterrupts();
+    timeSlice();
 } /* clockHandler */
 
 
@@ -541,9 +521,60 @@ void clockHandler(int dev, int unit)
    ----------------------------------------------------------------------- */
 int readtime()
 {
-    Current->cpuTime = (USLOSS_Clock() - Current->timeStarted)/1000;
-    return Current->cpuTime;
+    if (DEBUG && debugflag) {
+        USLOSS_Console("readtime(): current pid = %d, time started: %d, current time: %d\n", Current->pid, Current->timeStarted, USLOSS_Clock());
+        USLOSS_Console("readtime(): cpu time before: %d, slice time before: %d\n", Current->cpuTime, Current->sliceTime);
+    }
+    Current->cpuTime += USLOSS_Clock() - Current->timeStarted;
+    Current->sliceTime += USLOSS_Clock() - Current->timeStarted;
+    if (DEBUG && debugflag)
+        USLOSS_Console("readtime(): cpu time after: %d, slice time after: %d\n", Current->cpuTime, Current->sliceTime);
+
+    return Current->cpuTime/1000;
 } /* readtime */
+
+
+/* ------------------------------------------------------------------------
+   Name - timeSlice
+   Purpose - This operation calls the dispatcher if the currently executing 
+            process has exceeded its time slice; otherwise, it simply returns.
+   Parameters - none
+   Returns - nothing
+   Side Effects - may call dispatcher
+   ----------------------------------------------------------------------- */
+void timeSlice() {
+    if (DEBUG && debugflag)
+        USLOSS_Console("timeSlice(): called\n");
+
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("timeSlice()"); 
+    disableInterrupts();
+   
+    readtime();
+    if (Current->sliceTime >= TIMESLICE) { // current has exceeded its timeslice
+        if (DEBUG && debugflag)
+            USLOSS_Console("timeSlice(): time slicing\n");
+        deq(&ReadyList[Current->priority-1]); // remove current from ready list
+        Current->status = READY; 
+        enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
+        dispatcher();
+    }
+
+    enableInterrupts();
+} /* timeSlice */
+
+
+/* ------------------------------------------------------------------------
+   Name - readCurStartTime
+   Purpose - returns the time (in microseconds) at which the currently 
+                executing process began its current time slice 
+   Parameters - none
+   Returns - ^
+   Side Effects - none
+   ----------------------------------------------------------------------- */
+int readCurStartTime() {
+    return Current->timeStarted/1000;
+}
 
 
 /*
@@ -596,7 +627,7 @@ void requireKernelMode(char *name)
 {
     if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
 		//Called while in user mode, by process 2. Halting...
-        USLOSS_Console("%s: Called while in user mode, by process %d. Halting...\n", 
+        USLOSS_Console("%s: called while in user mode, by process %d. Halting...\n", 
 					   name, Current->pid);
         USLOSS_Halt(1); // from phase1 pdf
     }
@@ -632,6 +663,8 @@ void emptyProc(int pid) {
     ProcTable[i].zapStatus = 0;
     ProcTable[i].timeStarted = -1;
     ProcTable[i].cpuTime = -1;
+    ProcTable[i].sliceTime = 0;
+    ProcTable[i].name[0] = 0;
 	
     numProcs--;
 	//USLOSS_Console("Emptied %d", i);
@@ -647,6 +680,13 @@ void emptyProc(int pid) {
    Side Effects - 
    ----------------------------------------------------------------------- */
 int zap(int pid) {
+    if (DEBUG && debugflag)
+        USLOSS_Console("zap(): called\n");
+
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("zap()"); 
+    disableInterrupts();
+
 	procPtr process; 
 	if (Current->pid == pid) {
 		USLOSS_Console("Invalid zap pid\n");
@@ -655,13 +695,16 @@ int zap(int pid) {
 	
     process = &ProcTable[pid % MAXPROC];
 
-	if (process->pid == pid) {
-		process->zapStatus = 1;
-		Current->status = BLOCKED;
-		deq(&ReadyList[(Current->priority - 1)]);
-		//dumpProcesses();
-		dispatcher();
-	}	
+    if (process->status == EMPTY || process->pid != pid) {
+        USLOSS_Console("Cannot zap nonexistent process\n");
+        USLOSS_Halt(1);
+    }
+
+    if (process->status == QUIT)
+        return 0;
+
+	process->zapStatus = 1;
+	block(BLOCKED);
 	
 	if (process->status == QUIT) {
 		Current->status = READY;
@@ -699,6 +742,34 @@ int getpid() {
 }
 
 
+/* ------------------------------------------------------------------------
+   Name - block
+   Purpose - blocks the current process
+   Parameters - new status 
+   Returns -    -1: if process was zapped while blocked.
+                 0: otherwise.
+   Side Effects - blocks/changes ready list/calls dispatcher
+   ----------------------------------------------------------------------- */
+int block(int newStatus) {
+    if (DEBUG && debugflag)
+        USLOSS_Console("block(): called\n");
+
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("block()"); 
+    disableInterrupts();
+
+    Current->status = newStatus;
+    deq(&ReadyList[(Current->priority - 1)]);
+    dispatcher();
+
+    if (Current->zapStatus == 1) {
+        return -1;  
+    }
+    
+    return 0;
+}
+
+
 /* ----------------------------------------------------------------------- 
     int blockMe(int newStatus);
     This operation will block the calling process. newStatus is the value used to indicate
@@ -709,21 +780,34 @@ int getpid() {
     0: otherwise.
     ----------------------------------------------------------------------- */
 int blockMe(int newStatus) {
+    if (DEBUG && debugflag)
+        USLOSS_Console("blockMe(): called\n");
+
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("blockMe()"); 
+    disableInterrupts();
+
 	if (newStatus < 10) {
 		USLOSS_Console("newStatus < 10 \n");
 		USLOSS_Halt(1);
 	}
-	Current->status = newStatus;
 	
-	if (Current->zapStatus == 1) {
-		return -1;	
-	}
-	
-	return 0;
+    return block(newStatus);
 }
 
 
-
+/* ------------------------------------------------------------------------
+   Name - unblockProc
+   Purpose - unblocks the given process
+   Parameters - pid of the process to unblock 
+   Returns -    -2: if the indicated process was not blocked, does not exist, 
+                    is the current process, or is blocked on a status less than 
+                    or equal to 10. Thus, a process that is zap-blocked 
+                    or join-blocked cannot be unblocked with this function call.
+                -1:        if the calling process was zapped.
+                0:         otherwise
+   Side Effects - calls dispatcher
+   ----------------------------------------------------------------------- */
 int unblockProc(int pid) {
 	return 0;
 }
@@ -755,9 +839,9 @@ void dumpProcesses()
 		if (ProcTable[i].parentPtr != NULL)
 			p = ProcTable[i].parentPtr->pid;
 		else
-			p = -2;
+			p = -1;
 		USLOSS_Console("%3d%10d%10d%10s%10d%10d%10s\n", ProcTable[i].pid, p,
 					   ProcTable[i].priority, statusNames[ProcTable[i].status], 
-					   ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);
+					   ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime/1000, ProcTable[i].name);
     }
 }

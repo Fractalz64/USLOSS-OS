@@ -40,9 +40,10 @@ struct procStruct {
 	int				zapStatus; // 1 zapped; 0 not zapped
 	int 			timeStarted; // the time the current time slice started
 	int 			cpuTime; // the total amount of time the process has been running	
+	int 			sliceTime; // how long the process has been running in the current time slice
 };
 
-#define TIMESLICE 80
+#define TIMESLICE 80000
 
 /* process statuses */
 #define EMPTY 0

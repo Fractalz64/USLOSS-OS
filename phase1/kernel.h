@@ -10,6 +10,7 @@ typedef struct procQueue procQueue;
 #define READYLIST 0
 #define CHILDREN 1
 #define DEADCHILDREN 2
+#define ZAP 3
 
 struct procQueue {
 	procPtr head;
@@ -38,6 +39,9 @@ struct procStruct {
 	procQueue		deadChildrenQueue;	/* list of children who have quit in the order they have quit */
 	procPtr 		nextDeadSibling;
 	int				zapStatus; // 1 zapped; 0 not zapped
+	procQueue		zapQueue;
+	procPtr			nextZapPtr;
+	
 	int 			timeStarted; // the time the current time slice started
 	int 			cpuTime; // the total amount of time the process has been running	
 	int 			sliceTime; // how long the process has been running in the current time slice
@@ -51,6 +55,8 @@ struct procStruct {
 #define RUNNING 2
 #define BLOCKED 3
 #define QUIT 4
+
+#define ZBLOCKED 5
 
 struct psrBits {
 	unsigned int curMode:1;
@@ -90,6 +96,8 @@ void enq(procQueue* q, procPtr p) {
 			q->tail->nextProcPtr = p;
 		else if (q->type == CHILDREN)
 			q->tail->nextSiblingPtr = p;
+		else if (q->type == ZAP) 
+			q->tail->nextZapPtr = p;
 		else
 			q->tail->nextDeadSibling = p;
 		q->tail = p;
@@ -116,6 +124,8 @@ procPtr deq(procQueue* q) {
 			q->head = q->head->nextProcPtr;  
 		else if (q->type == CHILDREN)
 			q->head = q->head->nextSiblingPtr;  
+		else if (q->type == ZAP) 
+			q->head = q->head->nextZapPtr;
 		else 
 			q->head = q->head->nextDeadSibling;  
 		// USLOSS_Console("head = %s\n", q->head->name);

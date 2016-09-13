@@ -384,6 +384,9 @@ int join(int *status)
         if (DEBUG && debugflag)
             USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
     }
+	
+	if (Current->zapQueue.size != 0 ) 
+		return -1;
 
     // get the earliest dead child
     procPtr child = deq(&Current->deadChildrenQueue);
@@ -430,6 +433,11 @@ void quit(int status)
     Current->status = QUIT; // change status to QUIT
     Current->quitStatus = status; // store the given status
     deq(&ReadyList[Current->priority-1]); // remove self from ready list
+	while (Current->zapQueue.size != 0) {
+		procPtr zapper = deq(&Current->zapQueue);
+		zapper->status = READY;
+		enq(&ReadyList[zapper->priority-1], zapper);
+	}
 
     if (Current->parentPtr != NULL) {
         enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
@@ -660,6 +668,7 @@ void emptyProc(int pid) {
     ProcTable[i].parentPtr = NULL;
     initProcQueue(&ProcTable[i].childrenQueue, CHILDREN); 
     initProcQueue(&ProcTable[i].deadChildrenQueue, DEADCHILDREN); 
+	initProcQueue(&ProcTable[i].zapQueue, ZAP); 
     ProcTable[i].zapStatus = 0;
     ProcTable[i].timeStarted = -1;
     ProcTable[i].cpuTime = -1;
@@ -703,17 +712,17 @@ int zap(int pid) {
     if (process->status == QUIT)
         return 0;
 
-	process->zapStatus = 1;
-	block(BLOCKED);
+	enq(&process->zapQueue, Current);
+	block(ZBLOCKED);
 	
-	if (process->status == QUIT) {
+	/*if (process->status == QUIT) {
 		Current->status = READY;
 		enq(&ReadyList[Current->priority-1], Current);
 		return 0;
-	}
-	if (Current->zapStatus == 1) {
+	}*/
+	/*if (Current->zapStatus == 1) {
 		return -1;	
-	}
+	}*/
     return 0; // needs to compile
 } 
 
@@ -726,7 +735,7 @@ int zap(int pid) {
    Side Effects - 
    ----------------------------------------------------------------------- */
 int isZapped() {
-	return Current->zapStatus;
+	return (Current->zapQueue.size > 0);
 }
 
 
@@ -829,6 +838,7 @@ void dumpProcesses()
     statusNames[RUNNING] = "RUNNING";
     statusNames[BLOCKED] = "BLOCKED";
     statusNames[QUIT] = "QUIT";
+	statusNames[ZBLOCKED] = "ZBLOCKED";
 
 	//PID	Parent	Priority	Status		# Kids	CPUtime	Name
     int i;

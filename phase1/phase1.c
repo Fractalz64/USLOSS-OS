@@ -315,6 +315,9 @@ void dispatcher(void)
 
     procPtr nextProcess = NULL;
 
+    // update cpu time on current process
+    Current->cpuTime += Current->sliceTime/1000;
+
     // Find the highest priority non-empty process queue
     int i;
     for (i = 0; i < SENTINELPRIORITY; i++) {
@@ -513,7 +516,7 @@ void clockHandler(int dev, int unit)
 
 /* ------------------------------------------------------------------------
    Name - readtime
-   Purpose - updates and returns the CPU time (in milliseconds) used by the 
+   Purpose - Returns the CPU time (in milliseconds) used by the 
             current process.
    Parameters - none
    Returns - nothing
@@ -521,16 +524,15 @@ void clockHandler(int dev, int unit)
    ----------------------------------------------------------------------- */
 int readtime()
 {
-    if (DEBUG && debugflag) {
-        USLOSS_Console("readtime(): current pid = %d, time started: %d, current time: %d\n", Current->pid, Current->timeStarted, USLOSS_Clock());
-        USLOSS_Console("readtime(): cpu time before: %d, slice time before: %d\n", Current->cpuTime, Current->sliceTime);
-    }
-    Current->cpuTime += USLOSS_Clock() - Current->timeStarted;
-    Current->sliceTime += USLOSS_Clock() - Current->timeStarted;
-    if (DEBUG && debugflag)
-        USLOSS_Console("readtime(): cpu time after: %d, slice time after: %d\n", Current->cpuTime, Current->sliceTime);
+    // if (DEBUG && debugflag) {
+    //     USLOSS_Console("readtime(): current pid = %d, time started: %d, current time: %d\n", Current->pid, Current->timeStarted, USLOSS_Clock());
+    //     USLOSS_Console("readtime(): cpu time before: %d, slice time before: %d\n", Current->cpuTime, Current->sliceTime);
+    // }
+    // Current->sliceTime = USLOSS_Clock() - Current->timeStarted;
+    // if (DEBUG && debugflag)
+    //     USLOSS_Console("readtime(): cpu time after: %d, slice time after: %d\n", Current->cpuTime, Current->sliceTime);
 
-    return Current->cpuTime/1000;
+    return Current->cpuTime;
 } /* readtime */
 
 
@@ -550,8 +552,8 @@ void timeSlice() {
     requireKernelMode("timeSlice()"); 
     disableInterrupts();
    
-    readtime();
-    if (Current->sliceTime >= TIMESLICE) { // current has exceeded its timeslice
+	Current->sliceTime = USLOSS_Clock() - Current->timeStarted;
+    if (Current->sliceTime > TIMESLICE) { // current has exceeded its timeslice
         if (DEBUG && debugflag)
             USLOSS_Console("timeSlice(): time slicing\n");
         deq(&ReadyList[Current->priority-1]); // remove current from ready list
@@ -559,8 +561,8 @@ void timeSlice() {
         enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
         dispatcher();
     }
-
-    enableInterrupts();
+    else
+    	enableInterrupts(); // re-enable interrupts
 } /* timeSlice */
 
 
@@ -842,6 +844,6 @@ void dumpProcesses()
 			p = -1;
 		USLOSS_Console("%3d%10d%10d%10s%10d%10d%10s\n", ProcTable[i].pid, p,
 					   ProcTable[i].priority, statusNames[ProcTable[i].status], 
-					   ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime/1000, ProcTable[i].name);
+					   ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);
     }
 }

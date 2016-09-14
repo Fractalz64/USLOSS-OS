@@ -451,6 +451,7 @@ void quit(int status)
     Current->status = QUIT; // change status to QUIT
     Current->quitStatus = status; // store the given status
     deq(&ReadyList[Current->priority-1]); // remove self from ready list
+	
 	while (Current->zapQueue.size != 0) {
 		procPtr zapper = deq(&Current->zapQueue);
 		zapper->status = READY;
@@ -724,12 +725,17 @@ int zap(int pid) {
     process = &ProcTable[pid % MAXPROC];
 
     if (process->status == EMPTY || process->pid != pid) {
-        USLOSS_Console("Cannot zap nonexistent process\n");
+        USLOSS_Console("zap(): process being zapped does not exist.  Halting...\n");
         USLOSS_Halt(1);
     }
 
-    if (process->status == QUIT)
-        return 0;
+    if (process->status == QUIT) { // CHECK
+		if (Current->zapQueue.size > 0) 
+        	return -1;
+		else
+			return 0;
+	}
+
 
 	enq(&process->zapQueue, Current);
 	block(ZBLOCKED);
@@ -739,7 +745,7 @@ int zap(int pid) {
 		enq(&ReadyList[Current->priority-1], Current);
 		return 0;
 	}*/
-	if (Current->zapStatus == 1) {
+	if (Current->zapQueue.size > 0) {
 		return -1;	
 	}
     return 0; 
@@ -790,7 +796,7 @@ int block(int newStatus) {
     deq(&ReadyList[(Current->priority - 1)]);
     dispatcher();
 
-    if (Current->zapStatus == 1) {
+    if (Current->zapQueue.size > 0) {
         return -1;  
     }
     
@@ -838,7 +844,7 @@ int blockMe(int newStatus) {
    ----------------------------------------------------------------------- */
 int unblockProc(int pid) {
     // test if in kernel mode; halt if in user mode
-    requireKernelMode("blockMe()"); 
+    requireKernelMode("unblockProc(): called\n"); 
     disableInterrupts();
 
     int i = pid % MAXPROC;
@@ -849,7 +855,7 @@ int unblockProc(int pid) {
     enq(&ReadyList[ProcTable[i].priority-1], &ProcTable[i]);
     dispatcher();
 
-    if (Current->zapStatus == 1)
+    if (Current->zapQueue.size > 1)
         return -1;
     return 0;
 }
@@ -872,19 +878,29 @@ void dumpProcesses()
     statusNames[JBLOCKED] = "JOIN_BLOCK";
     statusNames[QUIT] = "QUIT";
 	statusNames[ZBLOCKED] = "ZAP_BLOCK";
-
+	
 	//PID	Parent	Priority	Status		# Kids	CPUtime	Name
     int i;
 	USLOSS_Console("%s%10s%10s%20s%10s%10s%10s\n", "PID", "Parent", 
 				   "Priority", "Status", "# Kids", "CPUtime", "Name");
     for (i = 0; i < MAXPROC; i++) {
 		int p;
-		if (ProcTable[i].parentPtr != NULL)
+		char s[20];
+
+		if (ProcTable[i].parentPtr != NULL) {
 			p = ProcTable[i].parentPtr->pid;
+			if (ProcTable[i].status > 10) 
+				sprintf(s, "%d", ProcTable[i].status);
+		}
 		else
 			p = -1;
-		USLOSS_Console("%-10d%-10d%-10d%-20s%-10d%-10d%-10s\n", ProcTable[i].pid, p,
-					   ProcTable[i].priority, statusNames[ProcTable[i].status], 
-					   ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);
+		if (ProcTable[i].status > 10) 
+			USLOSS_Console("%-10d%-10d%-10d%-20s%-10d%-10d%-10s\n", ProcTable[i].pid, p,
+				ProcTable[i].priority, s, ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, 
+			   	ProcTable[i].name);
+		else
+			USLOSS_Console("%-10d%-10d%-10d%-20s%-10d%-10d%-10s\n", ProcTable[i].pid, p,
+				ProcTable[i].priority, statusNames[ProcTable[i].status], 
+				ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);			
     }
 }

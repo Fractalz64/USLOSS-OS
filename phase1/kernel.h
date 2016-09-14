@@ -16,7 +16,7 @@ struct procQueue {
 	procPtr head;
 	procPtr tail;
 	int 	size;
-	int 	type; // either ready list (uses nextProcPtr) or dead children (uses nextDeadSibling)
+	int 	type; // which procPtr to use for next
 };
 
 /* Process struct */
@@ -41,7 +41,6 @@ struct procStruct {
 	int				zapStatus; // 1 zapped; 0 not zapped
 	procQueue		zapQueue;
 	procPtr			nextZapPtr;
-	
 	int 			timeStarted; // the time the current time slice started
 	int 			cpuTime; // the total amount of time the process has been running	
 	int 			sliceTime; // how long the process has been running in the current time slice
@@ -53,9 +52,8 @@ struct procStruct {
 #define EMPTY 0
 #define READY 1
 #define RUNNING 2
-#define BLOCKED 3
+#define JBLOCKED 3
 #define QUIT 4
-
 #define ZBLOCKED 5
 
 struct psrBits {

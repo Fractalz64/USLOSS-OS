@@ -159,31 +159,36 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 
     // Return if stack size is too small
     if (stacksize < USLOSS_MIN_STACK) { // found in usloss.h
-        USLOSS_Console("fork1(): Stack size too small.\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): Stack size too small.\n");
         return -2; // from the phase1 pdf
     }
 
     // Return if startFunc is null
     if (startFunc == NULL) { 
-        USLOSS_Console("fork1(): Start function is null.\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): Start function is null.\n");
         return -1; // from the phase1 pdf
     }
 
     // Return if name is null
     if (name == NULL) { 
-        USLOSS_Console("fork1(): Process name is null.\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): Process name is null.\n");
         return -1; // from the phase1 pdf
     }
 
     // Return if priority is out of range (except sentinel, which is below the min)
     if ((priority > MINPRIORITY || priority < MAXPRIORITY) && startFunc != sentinel) { 
-        USLOSS_Console("fork1(): Priority is out of range.\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): Priority is out of range.\n");
         return -1; // from the phase1 pdf
     }
 
     // handle case where there is no empty spot
     if (numProcs >= MAXPROC) {
-        USLOSS_Console("fork1(): No empty slot on the process table.\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): No empty slot on the process table.\n");
         return -1;
     }
 
@@ -199,7 +204,8 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 
     // fill-in entry in process table */
     if ( strlen(name) >= (MAXNAME - 1) ) {
-        USLOSS_Console("fork1(): Process name is too long.  Halting...\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): Process name is too long.  Halting...\n");
         USLOSS_Halt(1);
     }
     strcpy(ProcTable[procSlot].name, name);
@@ -207,7 +213,8 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
     if ( arg == NULL )
         ProcTable[procSlot].startArg[0] = '\0';
     else if ( strlen(arg) >= (MAXARG - 1) ) {
-        USLOSS_Console("fork1(): argument too long.  Halting...\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): argument too long.  Halting...\n");
         USLOSS_Halt(1);
     }
     else
@@ -219,7 +226,8 @@ int fork1(char *name, int (*startFunc)(char *), char *arg,
 
     // make sure malloc worked, halt otherwise
     if (ProcTable[procSlot].stack == NULL) {
-        USLOSS_Console("fork1(): Malloc failed.  Halting...\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("fork1(): Malloc failed.  Halting...\n");
         USLOSS_Halt(1);
     }
 
@@ -315,9 +323,6 @@ void dispatcher(void)
 
     procPtr nextProcess = NULL;
 
-    // update cpu time on current process
-    Current->cpuTime += Current->sliceTime/1000;
-
     // Find the highest priority non-empty process queue
     int i;
     for (i = 0; i < SENTINELPRIORITY; i++) {
@@ -329,7 +334,8 @@ void dispatcher(void)
 
     // Print message and return if the ready list is empty
     if (nextProcess == NULL) {
-        USLOSS_Console("dispatcher(): ready list is empty!\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("dispatcher(): ready list is empty!\n");
         return;
     }
 
@@ -340,9 +346,17 @@ void dispatcher(void)
     procPtr old = Current;
     Current = nextProcess;
 
-    Current->status = RUNNING; // set status to RUNNING
-    Current->sliceTime = 0;
-    Current->timeStarted = USLOSS_Clock(); // set time started
+    if (old != Current) {
+        // update cpu time on old process
+        if (old->pid > -1)
+            old->cpuTime += USLOSS_Clock() - old->timeStarted;
+        // USLOSS_Console("updated pid %d cpu time = %d\n", old->pid, old->cpuTime);
+
+        Current->status = RUNNING; // set status to RUNNING
+        Current->sliceTime = 0;
+        Current->timeStarted = USLOSS_Clock(); // set time started
+        // USLOSS_Console("pid %d start time = %d\n", Current->pid, Current->timeStarted);
+    }
 
     // your dispatcher should call p1_switch(int old, int new) with the 
     // PID’s of the process that was previously running and the next process to run. 
@@ -377,13 +391,14 @@ int join(int *status)
 
     // check if has children
     if (Current->childrenQueue.size == 0) {
-        USLOSS_Console("join(): No children\n");
+        if (DEBUG && debugflag)
+            USLOSS_Console("join(): No children\n");
         return -2;
     }
 
     // if current has no dead children, block self and wait.
     if (Current->deadChildrenQueue.size == 0) {
-        block(BLOCKED);
+        block(JBLOCKED);
         if (DEBUG && debugflag)
             USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
     }
@@ -445,7 +460,7 @@ void quit(int status)
     if (Current->parentPtr != NULL) {
         enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
 
-        if (Current->parentPtr->status == BLOCKED) { // unblock parent
+        if (Current->parentPtr->status == JBLOCKED) { // unblock parent
             Current->parentPtr->status = READY;
             enq(&ReadyList[Current->parentPtr->priority-1], Current->parentPtr);
         }
@@ -458,6 +473,10 @@ void quit(int status)
         procPtr child = deq(&Current->deadChildrenQueue);
         emptyProc(child->pid);
     }
+
+    // delete current if it has no parent
+    if (Current->parentPtr == NULL)
+        emptyProc(Current->pid);
 
     p1_quit(Current->pid);
 
@@ -494,13 +513,10 @@ int sentinel (char *dummy)
 /* check to determine if deadlock has occurred... */
 static void checkDeadlock()
 {
-    // check if all processes have quit
-    int i;
-    for (i = 0; i < MAXPROC; i++) { 
-        if (ProcTable[i].status != QUIT && ProcTable[i].status != EMPTY && ProcTable[i].startFunc != sentinel) {
-            USLOSS_Console("checkDeadlock(): Processes remain. Abnormal termination. \n");
-            USLOSS_Halt(1);
-        }
+    // check if all other processes have quit
+    if (numProcs > 1) {
+        USLOSS_Console("checkDeadlock(): numProc = %d. Only Sentinel should be left. Halting...\n", numProcs);
+        USLOSS_Halt(1);
     }
 
     USLOSS_Console("All processes completed.\n");
@@ -540,7 +556,7 @@ int readtime()
     // if (DEBUG && debugflag)
     //     USLOSS_Console("readtime(): cpu time after: %d, slice time after: %d\n", Current->cpuTime, Current->sliceTime);
 
-    return Current->cpuTime;
+    return Current->cpuTime/1000;
 } /* readtime */
 
 
@@ -561,6 +577,7 @@ void timeSlice() {
     disableInterrupts();
    
 	Current->sliceTime = USLOSS_Clock() - Current->timeStarted;
+    // USLOSS_Console("pid %d slice time = %d\n", Current->pid, Current->sliceTime);
     if (Current->sliceTime > TIMESLICE) { // current has exceeded its timeslice
         if (DEBUG && debugflag)
             USLOSS_Console("timeSlice(): time slicing\n");
@@ -700,7 +717,7 @@ int zap(int pid) {
 
 	procPtr process; 
 	if (Current->pid == pid) {
-		USLOSS_Console("Invalid zap pid\n");
+		USLOSS_Console("zap(): process %d tried to zap itself.  Halting...\n", pid);
 		USLOSS_Halt(1);
 	}
 	
@@ -722,10 +739,10 @@ int zap(int pid) {
 		enq(&ReadyList[Current->priority-1], Current);
 		return 0;
 	}*/
-	/*if (Current->zapStatus == 1) {
+	if (Current->zapStatus == 1) {
 		return -1;	
-	}*/
-    return 0; // needs to compile
+	}
+    return 0; 
 } 
 
 
@@ -820,7 +837,21 @@ int blockMe(int newStatus) {
    Side Effects - calls dispatcher
    ----------------------------------------------------------------------- */
 int unblockProc(int pid) {
-	return 0;
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("blockMe()"); 
+    disableInterrupts();
+
+    int i = pid % MAXPROC;
+    if (ProcTable[i].pid != pid || ProcTable[i].status <= 10)
+        return -2;
+
+    ProcTable[i].status = READY;
+    enq(&ReadyList[ProcTable[i].priority-1], &ProcTable[i]);
+    dispatcher();
+
+    if (Current->zapStatus == 1)
+        return -1;
+    return 0;
 }
 
 
@@ -838,21 +869,21 @@ void dumpProcesses()
     statusNames[EMPTY] = "EMPTY";
     statusNames[READY] = "READY";
     statusNames[RUNNING] = "RUNNING";
-    statusNames[BLOCKED] = "BLOCKED";
+    statusNames[JBLOCKED] = "JOIN_BLOCK";
     statusNames[QUIT] = "QUIT";
-	statusNames[ZBLOCKED] = "ZBLOCKED";
+	statusNames[ZBLOCKED] = "ZAP_BLOCK";
 
 	//PID	Parent	Priority	Status		# Kids	CPUtime	Name
     int i;
-	USLOSS_Console("%s%10s%10s%10s%10s%10s%10s\n", "PID", "PARENT", 
-				   "PRIORITY", "STATUS", "#KIDS", "CPU_TIME", "NAME");
+	USLOSS_Console("%s%10s%10s%20s%10s%10s%10s\n", "PID", "Parent", 
+				   "Priority", "Status", "# Kids", "CPUtime", "Name");
     for (i = 0; i < MAXPROC; i++) {
 		int p;
 		if (ProcTable[i].parentPtr != NULL)
 			p = ProcTable[i].parentPtr->pid;
 		else
 			p = -1;
-		USLOSS_Console("%3d%10d%10d%10s%10d%10d%10s\n", ProcTable[i].pid, p,
+		USLOSS_Console("%-10d%-10d%-10d%-20s%-10d%-10d%-10s\n", ProcTable[i].pid, p,
 					   ProcTable[i].priority, statusNames[ProcTable[i].status], 
 					   ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);
     }

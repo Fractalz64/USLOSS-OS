@@ -402,18 +402,18 @@ int join(int *status)
         if (DEBUG && debugflag)
             USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
     }
-	
-	if (Current->zapQueue.size != 0 ) 
-		return -1;
 
     // get the earliest dead child
     procPtr child = deq(&Current->deadChildrenQueue);
     *status = child->quitStatus;
     int childPid = child->pid;
-
     // put child to rest
-    qRemoveChild(&Current->childrenQueue, childPid); 
+    qRemoveChild(&Current->childrenQueue, childPid); // Problem here test 28 and 27?
     emptyProc(childPid);
+
+    if (Current->zapQueue.size != 0 ) {
+        childPid = -1;
+    }
 	
     return childPid;
 } /* join */
@@ -451,13 +451,6 @@ void quit(int status)
     Current->status = QUIT; // change status to QUIT
     Current->quitStatus = status; // store the given status
     deq(&ReadyList[Current->priority-1]); // remove self from ready list
-	
-	while (Current->zapQueue.size != 0) {
-		procPtr zapper = deq(&Current->zapQueue);
-		zapper->status = READY;
-		enq(&ReadyList[zapper->priority-1], zapper);
-	}
-
     if (Current->parentPtr != NULL) {
         enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
 
@@ -468,6 +461,12 @@ void quit(int status)
     }
 
     // to do later: unblock processes that zap'd this process
+    
+    while (Current->zapQueue.size != 0) {
+        procPtr zapper = deq(&Current->zapQueue);
+        zapper->status = READY;
+        enq(&ReadyList[zapper->priority-1], zapper);
+    }
 
     // remove any dead children current has form the process table
     while (Current->deadChildrenQueue.size > 0) {

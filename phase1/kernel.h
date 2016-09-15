@@ -52,9 +52,10 @@ struct procStruct {
 #define EMPTY 0
 #define READY 1
 #define RUNNING 2
-#define JBLOCKED 3
+#define TIMESLICED 3
 #define QUIT 4
-#define ZBLOCKED 5
+#define JBLOCKED 5
+#define ZBLOCKED 6
 
 struct psrBits {
 	unsigned int curMode:1;
@@ -86,7 +87,6 @@ void initProcQueue(procQueue* q, int type) {
 
 /* Add the given procPtr to the back of the given queue. */
 void enq(procQueue* q, procPtr p) {
-	// USLOSS_Console("enquing process id %d\n", p->pid);
 	if (q->head == NULL && q->tail == NULL) {
 		q->head = q->tail = p;
 	} else {
@@ -101,19 +101,14 @@ void enq(procQueue* q, procPtr p) {
 		q->tail = p;
 	}
 	q->size++;
-	// USLOSS_Console("head = %s\n", q->head->name);
-	// USLOSS_Console("tail = %s\n", q->tail->name);
-	// USLOSS_Console("size = %d\n", q->size);
 }
 
 /* Remove and return the head of the given queue. */
 procPtr deq(procQueue* q) {
 	procPtr temp = q->head;
 	if (q->head == NULL) {
-		// printf("Empty Queue\n");
 		return NULL;
 	}
-	// USLOSS_Console("dequing process id %d\n", q->head->pid);
 	if (q->head == q->tail) {
 		q->head = q->tail = NULL; 
 	}
@@ -126,20 +121,17 @@ procPtr deq(procQueue* q) {
 			q->head = q->head->nextZapPtr;
 		else 
 			q->head = q->head->nextDeadSibling;  
-		// USLOSS_Console("head = %s\n", q->head->name);
-		// USLOSS_Console("tail = %s\n", q->tail->name);
 	}
 	q->size--;
-	// USLOSS_Console("size = %d\n", q->size);
 	return temp;
 }
 
-/* Remove the child process with the given pid from the queue */
-void qRemoveChild(procQueue* q, int pid) {
-	if (q->head == 	NULL || q->type != CHILDREN)
+/* Remove the child process from the queue */
+void qRemoveChild(procQueue* q, procPtr child) {
+	if (q->head == NULL || q->type != CHILDREN)
 		return;
 
-	if (q->head->pid == pid) {
+	if (q->head == child) {
 		deq(q);
 		return;
 	}
@@ -148,20 +140,21 @@ void qRemoveChild(procQueue* q, int pid) {
 	procPtr p = q->head->nextSiblingPtr;
 
 	while (p != NULL) {
-		if (p->pid == pid) {
+		if (p == child) {
 			if (p == q->tail)
 				q->tail = prev;
 			else
 				prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
 			q->size--;
 		}
+		prev = p;
+		p = p->nextSiblingPtr;
 	}
 }
 
 /* Return the head of the given queue. */
 procPtr peek(procQueue* q) {
 	if (q->head == NULL) {
-		// printf("Empty Queue\n");
 		return NULL;
 	}
 	return q->head;   

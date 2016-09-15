@@ -25,7 +25,6 @@ void requireKernelMode(char *);
 void clockHandler();
 int readtime();
 void emptyProc(int);
-int block(int);
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -306,6 +305,48 @@ void launch()
 
 
 /* ------------------------------------------------------------------------
+   Name - getNextProcess
+   Purpose - finds and returns a pointer to the highest priority process.
+   Parameters - none
+   Returns - procPtr to highest priority process
+   Side Effects - none
+   ----------------------------------------------------------------------- */
+procPtr getNextProcess(void)
+{
+    procPtr nextProcess = NULL;
+
+    // Find the highest priority non-empty process queue
+    int i;
+    for (i = 0; i < SENTINELPRIORITY; i++) {
+        if (ReadyList[i].size > 0) {
+            nextProcess = peek(&ReadyList[i]); // found highest priority process
+            break;
+        }
+    }
+
+    return nextProcess;
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - pause
+   Purpose - pauses the current process by removing it from the ready list,
+            putting it back on the end, and updating its cpu time.
+   Parameters - none
+   Returns - nothing
+   Side Effects - none
+   ----------------------------------------------------------------------- */
+void pause()
+{
+    Current->cpuTime += Current->sliceTime; // update cpu time
+    Current->sliceTime = 0; // reset slice time
+    deq(&ReadyList[Current->priority-1]); // remove current from ready list
+    Current->status = READY; // change status to ready
+    enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
+}
+
+
+/* ------------------------------------------------------------------------
    Name - dispatcher
    Purpose - dispatches ready processes.  The process with the highest
              priority (the first on the ready list) is scheduled to
@@ -321,16 +362,18 @@ void dispatcher(void)
     requireKernelMode("dispatcher()"); 
     disableInterrupts(); 
 
-    procPtr nextProcess = NULL;
-
-    // Find the highest priority non-empty process queue
-    int i;
-    for (i = 0; i < SENTINELPRIORITY; i++) {
-        if (ReadyList[i].size > 0) {
-            nextProcess = peek(&ReadyList[i]);
-            break;
-        }
+    // see if current was time sliced
+    if (Current->status == TIMESLICED) {
+        pause();
     }
+
+    // if current is blocked, remove it from ready list
+    else if (Current->status > QUIT) {
+        Current->cpuTime += Current->sliceTime; // update cpu time
+        deq(&ReadyList[(Current->priority - 1)]); // remove from ready list
+    }
+
+    procPtr nextProcess = getNextProcess();
 
     // Print message and return if the ready list is empty
     if (nextProcess == NULL) {
@@ -342,20 +385,29 @@ void dispatcher(void)
     if (DEBUG && debugflag)
         USLOSS_Console("dispatcher(): next process is %s\n\n", nextProcess->name);
 
+    // move current to the back of its ready list if its still running
+    if (Current != nextProcess && Current->status == RUNNING) {
+        pause();
+    }
+
     // update current
     procPtr old = Current;
     Current = nextProcess;
 
-    if (old != Current) {
-        // update cpu time on old process
-        if (old->pid > -1)
-            old->cpuTime += USLOSS_Clock() - old->timeStarted;
-        // USLOSS_Console("updated pid %d cpu time = %d\n", old->pid, old->cpuTime);
+    // if (old != Current) {
+    //     // update cpu time on old process
+    //     // if (old->pid > -1)
+    //     //     old->cpuTime += USLOSS_Clock() - old->timeStarted;
+    //     // USLOSS_Console("updated pid %d cpu time = %d\n", old->pid, old->cpuTime);
 
-        Current->status = RUNNING; // set status to RUNNING
-        Current->sliceTime = 0;
+    //     // Current->status = RUNNING; // set status to RUNNING
+    //     // Current->timeStarted = USLOSS_Clock(); // set time started
+    //     // USLOSS_Console("pid %d start time = %d\n", Current->pid, Current->timeStarted);
+    // }
+
+    Current->status = RUNNING; // set status to RUNNING
+    if (old != Current) {
         Current->timeStarted = USLOSS_Clock(); // set time started
-        // USLOSS_Console("pid %d start time = %d\n", Current->pid, Current->timeStarted);
     }
 
     // your dispatcher should call p1_switch(int old, int new) with the 
@@ -398,23 +450,24 @@ int join(int *status)
 
     // if current has no dead children, block self and wait.
     if (Current->deadChildrenQueue.size == 0) {
-        block(JBLOCKED);
+        Current->status = JBLOCKED;
         if (DEBUG && debugflag)
             USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
+        dispatcher();
     }
 
     // get the earliest dead child
     procPtr child = deq(&Current->deadChildrenQueue);
     *status = child->quitStatus;
     int childPid = child->pid;
-    // put child to rest
 
+    // put child to rest
     emptyProc(childPid);
 
     if (Current->zapQueue.size != 0 ) {
         childPid = -1;
     }
-
+  
     return childPid;
 } /* join */
 
@@ -450,7 +503,8 @@ void quit(int status)
 
     Current->status = QUIT; // change status to QUIT
     Current->quitStatus = status; // store the given status
-    deq(&ReadyList[Current->priority-1]); // remove self from ready list
+    deq(&ReadyList[(Current->priority - 1)]); // remove from ready list
+
     if (Current->parentPtr != NULL) {
         qRemoveChild(&Current->parentPtr->childrenQueue, Current); // remove self from parent's list of children
         enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
@@ -521,7 +575,8 @@ int zap(int pid) {
     }
 
     enq(&process->zapQueue, Current);
-    block(ZBLOCKED);
+    process->status = ZBLOCKED; 
+    dispatcher();
 
     if (Current->zapQueue.size > 0) {
         return -1;  
@@ -554,34 +609,6 @@ int getpid() {
 }
 
 
-/* ------------------------------------------------------------------------
-   Name - block
-   Purpose - blocks the current process
-   Parameters - new status 
-   Returns -    -1: if process was zapped while blocked.
-                 0: otherwise.
-   Side Effects - blocks/changes ready list/calls dispatcher
-   ----------------------------------------------------------------------- */
-int block(int newStatus) {
-    if (DEBUG && debugflag)
-        USLOSS_Console("block(): called\n");
-
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("block()"); 
-    disableInterrupts();
-
-    Current->status = newStatus;
-    deq(&ReadyList[(Current->priority - 1)]);
-    dispatcher();
-
-    if (Current->zapQueue.size > 0) {
-        return -1;  
-    }
-    
-    return 0;
-}
-
-
 /* ----------------------------------------------------------------------- 
     int blockMe(int newStatus);
     This operation will block the calling process. newStatus is the value used to indicate
@@ -604,7 +631,15 @@ int blockMe(int newStatus) {
         USLOSS_Halt(1);
     }
 
-    return block(newStatus);
+    // update status and call dispatcher
+    Current->status = newStatus;
+    dispatcher();
+
+    if (Current->zapQueue.size > 0) {
+        return -1;  
+    }
+    
+    return 0;
 }
 
 
@@ -700,7 +735,7 @@ void clockHandler(int dev, int unit)
             current process.
    Parameters - none
    Returns - nothing
-   Side Effects - update's current process's CPU time
+   Side Effects - none
    ----------------------------------------------------------------------- */
 int readtime()
 {
@@ -742,9 +777,10 @@ void timeSlice() {
     if (Current->sliceTime > TIMESLICE) { // current has exceeded its timeslice
         if (DEBUG && debugflag)
             USLOSS_Console("timeSlice(): time slicing\n");
-        deq(&ReadyList[Current->priority-1]); // remove current from ready list
-        Current->status = READY; 
-        enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
+        // deq(&ReadyList[Current->priority-1]); // remove current from ready list
+        // Current->status = READY; 
+        // enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
+        Current->status = TIMESLICED;
         dispatcher();
     }
     else
@@ -847,208 +883,6 @@ void requireKernelMode(char *name)
 
 
 /* ------------------------------------------------------------------------
-<<<<<<< HEAD
-   Name - emptyProc
-   Purpose - Cleans out the ProcTable entry of the given process.
-   Parameters - pid of process to remove
-   Returns - nothing
-   Side Effects - changes ProcTable
-   ----------------------------------------------------------------------- */
-void emptyProc(int pid) {
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("emptyProc()"); 
-    disableInterrupts();
-
-    int i = pid % MAXPROC;
-
-    ProcTable[i].status = EMPTY; // set status to be open
-    ProcTable[i].pid = -1; // set pid to -1 to show it hasn't been assigned
-    ProcTable[i].nextProcPtr = NULL; // set pointers to null
-    ProcTable[i].nextSiblingPtr = NULL;
-    ProcTable[i].nextDeadSibling = NULL;
-    ProcTable[i].startFunc = NULL;
-    ProcTable[i].priority = -1;
-    ProcTable[i].stack = NULL;
-    ProcTable[i].stackSize = -1;
-    ProcTable[i].parentPtr = NULL;
-    initProcQueue(&ProcTable[i].childrenQueue, CHILDREN); 
-    initProcQueue(&ProcTable[i].deadChildrenQueue, DEADCHILDREN); 
-	initProcQueue(&ProcTable[i].zapQueue, ZAP); 
-    ProcTable[i].zapStatus = 0;
-    ProcTable[i].timeStarted = -1;
-    ProcTable[i].cpuTime = -1;
-    ProcTable[i].sliceTime = 0;
-    ProcTable[i].name[0] = 0;
-	
-    numProcs--;
-	//USLOSS_Console("Emptied %d", i);
-}
-
-
-/* ------------------------------------------------------------------------
-   Name - zap
-   Purpose - 
-   Parameters - 
-   Returns -  -1: the calling process itself was zapped while in zap.
-               0: the zapped process has called quit.
-   Side Effects - 
-   ----------------------------------------------------------------------- */
-int zap(int pid) {
-    if (DEBUG && debugflag)
-        USLOSS_Console("zap(): called\n");
-
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("zap()"); 
-    disableInterrupts();
-
-	procPtr process; 
-	if (Current->pid == pid) {
-		USLOSS_Console("zap(): process %d tried to zap itself.  Halting...\n", pid);
-		USLOSS_Halt(1);
-	}
-	
-    process = &ProcTable[pid % MAXPROC];
-
-    if (process->status == EMPTY || process->pid != pid) {
-        USLOSS_Console("zap(): process being zapped does not exist.  Halting...\n");
-        USLOSS_Halt(1);
-    }
-
-    if (process->status == QUIT) { // CHECK
-		if (Current->zapQueue.size > 0) 
-        	return -1;
-		else
-			return 0;
-	}
-
-
-	enq(&process->zapQueue, Current);
-	block(ZBLOCKED);
-	
-	/*if (process->status == QUIT) {
-		Current->status = READY;
-		enq(&ReadyList[Current->priority-1], Current);
-		return 0;
-	}*/
-	if (Current->zapQueue.size > 0) {
-		return -1;	
-	}
-    return 0; 
-} 
-
-
-/* ------------------------------------------------------------------------
-   Name - isZapped
-   Purpose - 
-   Parameters - 
-   Returns -  
-   Side Effects - 
-   ----------------------------------------------------------------------- */
-int isZapped() {
-	return (Current->zapQueue.size > 0);
-}
-
-
-/* ------------------------------------------------------------------------
-   Name - getpid
-   Purpose - return pid
-   Parameters - none
-   Returns - current process pid
-   Side Effects - ^
-   ----------------------------------------------------------------------- */
-int getpid() {
-	return Current->pid;	
-}
-
-
-/* ------------------------------------------------------------------------
-   Name - block
-   Purpose - blocks the current process
-   Parameters - new status 
-   Returns -    -1: if process was zapped while blocked.
-                 0: otherwise.
-   Side Effects - blocks/changes ready list/calls dispatcher
-   ----------------------------------------------------------------------- */
-int block(int newStatus) {
-    if (DEBUG && debugflag)
-        USLOSS_Console("block(): called\n");
-
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("block()"); 
-    disableInterrupts();
-
-    Current->status = newStatus;
-    deq(&ReadyList[(Current->priority - 1)]);
-    dispatcher();
-
-    if (Current->zapQueue.size > 0) {
-        return -1;  
-    }
-    
-    return 0;
-}
-
-
-/* ----------------------------------------------------------------------- 
-    int blockMe(int newStatus);
-    This operation will block the calling process. newStatus is the value used to indicate
-    the status of the process in the dumpProcesses command. newStatus must be greater
-    than 10; if it is not, then halt USLOSS with an appropriate error message.
-    Return values:
-    -1: if process was zapped while blocked.
-    0: otherwise.
-    ----------------------------------------------------------------------- */
-int blockMe(int newStatus) {
-    if (DEBUG && debugflag)
-        USLOSS_Console("blockMe(): called\n");
-
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("blockMe()"); 
-    disableInterrupts();
-
-	if (newStatus < 10) {
-		USLOSS_Console("newStatus < 10 \n");
-		USLOSS_Halt(1);
-	}
-	
-    return block(newStatus);
-}
-
-
-/* ------------------------------------------------------------------------
-   Name - unblockProc
-   Purpose - unblocks the given process
-   Parameters - pid of the process to unblock 
-   Returns -    -2: if the indicated process was not blocked, does not exist, 
-                    is the current process, or is blocked on a status less than 
-                    or equal to 10. Thus, a process that is zap-blocked 
-                    or join-blocked cannot be unblocked with this function call.
-                -1:        if the calling process was zapped.
-                0:         otherwise
-   Side Effects - calls dispatcher
-   ----------------------------------------------------------------------- */
-int unblockProc(int pid) {
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("unblockProc(): called\n"); 
-    disableInterrupts();
-
-    int i = pid % MAXPROC;
-    if (ProcTable[i].pid != pid || ProcTable[i].status <= 10)
-        return -2;
-
-    ProcTable[i].status = READY;
-    enq(&ReadyList[ProcTable[i].priority-1], &ProcTable[i]);
-    dispatcher();
-
-    if (Current->zapQueue.size > 1)
-        return -1;
-    return 0;
-}
-
-
-/* ------------------------------------------------------------------------
-=======
->>>>>>> 11922a06cc4c54a1c9d2ea12bd6e0aaf50636667
    Name - dumpProcesses
    Purpose - Prints information about each process on the process table,
              for debugging.
@@ -1058,19 +892,19 @@ int unblockProc(int pid) {
    ----------------------------------------------------------------------- */
 void dumpProcesses()
 {
-    const char *statusNames[7];
+    const char *statusNames[6];
     statusNames[EMPTY] = "EMPTY";
     statusNames[READY] = "READY";
     statusNames[RUNNING] = "RUNNING";
     statusNames[JBLOCKED] = "JOIN_BLOCK";
     statusNames[QUIT] = "QUIT";
     statusNames[ZBLOCKED] = "ZAP_BLOCK";
-
+  
+    //PID Parent  Priority  Status    # Kids  CPUtime Name
     int i;
     USLOSS_Console("%-6s%-8s%-16s%-16s%-8s%-8s%s\n", "PID", "Parent", 
            "Priority", "Status", "# Kids", "CPUtime", "Name");
     for (i = 0; i < MAXPROC; i++) {
-
     int p;
     char s[20];
 

@@ -323,6 +323,13 @@ void dispatcher(void)
 
     procPtr nextProcess = NULL;
 
+    // if current is still running, remove it from ready list and put it back on the end 
+    if (Current->status == RUNNING) {
+        Current->status = READY;
+        deq(&ReadyList[Current->priority-1]);
+        enq(&ReadyList[Current->priority-1], Current);
+    }
+
     // Find the highest priority non-empty process queue
     int i;
     for (i = 0; i < SENTINELPRIORITY; i++) {
@@ -345,17 +352,14 @@ void dispatcher(void)
     // update current
     procPtr old = Current;
     Current = nextProcess;
+    Current->status = RUNNING; // set status to RUNNING
 
+    // set slice time and time started 
     if (old != Current) {
-        // update cpu time on old process
         if (old->pid > -1)
-            old->cpuTime += USLOSS_Clock() - old->timeStarted;
-        // USLOSS_Console("updated pid %d cpu time = %d\n", old->pid, old->cpuTime);
-
-        Current->status = RUNNING; // set status to RUNNING
+            old->cpuTime += USLOSS_Clock() - old->timeStarted; // update cpu time for previous process
         Current->sliceTime = 0;
         Current->timeStarted = USLOSS_Clock(); // set time started
-        // USLOSS_Console("pid %d start time = %d\n", Current->pid, Current->timeStarted);
     }
 
     // your dispatcher should call p1_switch(int old, int new) with the 
@@ -407,14 +411,12 @@ int join(int *status)
     procPtr child = deq(&Current->deadChildrenQueue);
     *status = child->quitStatus;
     int childPid = child->pid;
-
     // put child to rest
     emptyProc(childPid);
 
     if (Current->zapQueue.size != 0 ) {
         childPid = -1;
     }
-  
     return childPid;
 } /* join */
 
@@ -737,14 +739,14 @@ void timeSlice() {
     requireKernelMode("timeSlice()"); 
     disableInterrupts();
    
-  Current->sliceTime = USLOSS_Clock() - Current->timeStarted;
-    // USLOSS_Console("pid %d slice time = %d\n", Current->pid, Current->sliceTime);
+    Current->sliceTime = USLOSS_Clock() - Current->timeStarted;
     if (Current->sliceTime > TIMESLICE) { // current has exceeded its timeslice
         if (DEBUG && debugflag)
             USLOSS_Console("timeSlice(): time slicing\n");
-        deq(&ReadyList[Current->priority-1]); // remove current from ready list
-        Current->status = READY; 
-        enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
+        // deq(&ReadyList[Current->priority-1]); // remove current from ready list
+        // Current->status = READY; 
+        Current->sliceTime = 0; // reset slice time
+        // enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
         dispatcher();
     }
     else
@@ -863,10 +865,10 @@ void dumpProcesses()
     statusNames[JBLOCKED] = "JOIN_BLOCK";
     statusNames[QUIT] = "QUIT";
     statusNames[ZBLOCKED] = "ZAP_BLOCK";
-  
+
     //PID Parent  Priority  Status    # Kids  CPUtime Name
     int i;
-    USLOSS_Console("%-6s%-8s%-16s%-16s%-8s%-8s%s\n", "PID", "Parent", 
+    USLOSS_Console("%-6s%-8s%-16s%-16s%-8s%-8s%s\n", "PID", "Parent",
            "Priority", "Status", "# Kids", "CPUtime", "Name");
     for (i = 0; i < MAXPROC; i++) {
     int p;
@@ -874,18 +876,18 @@ void dumpProcesses()
 
     if (ProcTable[i].parentPtr != NULL) {
         p = ProcTable[i].parentPtr->pid;
-        if (ProcTable[i].status > 10) 
+        if (ProcTable[i].status > 10)
             sprintf(s, "%d", ProcTable[i].status);
     }
     else
         p = -1;
-    if (ProcTable[i].status > 10) 
+    if (ProcTable[i].status > 10)
         USLOSS_Console(" %-7d%-9d%-13d%-18s%-9d%-5d%s\n", ProcTable[i].pid, p,
-        ProcTable[i].priority, s, ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, 
-        ProcTable[i].name);
+            ProcTable[i].priority, s, ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime,
+            ProcTable[i].name);
     else
         USLOSS_Console(" %-7d%-9d%-13d%-18s%-9d%-5d%s\n", ProcTable[i].pid, p,
-        ProcTable[i].priority, statusNames[ProcTable[i].status], 
-        ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);      
+            ProcTable[i].priority, statusNames[ProcTable[i].status],
+            ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);
     }
 }

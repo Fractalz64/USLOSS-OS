@@ -16,7 +16,7 @@ struct procQueue {
 	procPtr head;
 	procPtr tail;
 	int 	size;
-	int 	type; // which procPtr to use for next
+	int 	type; /* which procPtr to use for next */
 };
 
 /* Process struct */
@@ -52,7 +52,6 @@ struct procStruct {
 #define EMPTY 0
 #define READY 1
 #define RUNNING 2
-#define TIMESLICED 3
 #define QUIT 4
 #define JBLOCKED 5
 #define ZBLOCKED 6
@@ -76,86 +75,3 @@ union psrValues {
 #define MAXPRIORITY 1
 #define SENTINELPID 1
 #define SENTINELPRIORITY (MINPRIORITY + 1)
-
-/* Initialize the given procQueue */
-void initProcQueue(procQueue* q, int type) {
-	q->head = NULL;
-	q->tail = NULL;
-	q->size = 0;
-	q->type = type;
-}
-
-/* Add the given procPtr to the back of the given queue. */
-void enq(procQueue* q, procPtr p) {
-	if (q->head == NULL && q->tail == NULL) {
-		q->head = q->tail = p;
-	} else {
-		if (q->type == READYLIST)
-			q->tail->nextProcPtr = p;
-		else if (q->type == CHILDREN)
-			q->tail->nextSiblingPtr = p;
-		else if (q->type == ZAP) 
-			q->tail->nextZapPtr = p;
-		else
-			q->tail->nextDeadSibling = p;
-		q->tail = p;
-	}
-	q->size++;
-}
-
-/* Remove and return the head of the given queue. */
-procPtr deq(procQueue* q) {
-	procPtr temp = q->head;
-	if (q->head == NULL) {
-		return NULL;
-	}
-	if (q->head == q->tail) {
-		q->head = q->tail = NULL; 
-	}
-	else {
-		if (q->type == READYLIST)
-			q->head = q->head->nextProcPtr;  
-		else if (q->type == CHILDREN)
-			q->head = q->head->nextSiblingPtr;  
-		else if (q->type == ZAP) 
-			q->head = q->head->nextZapPtr;
-		else 
-			q->head = q->head->nextDeadSibling;  
-	}
-	q->size--;
-	return temp;
-}
-
-/* Remove the child process from the queue */
-void qRemoveChild(procQueue* q, procPtr child) {
-	if (q->head == NULL || q->type != CHILDREN)
-		return;
-
-	if (q->head == child) {
-		deq(q);
-		return;
-	}
-
-	procPtr prev = q->head;
-	procPtr p = q->head->nextSiblingPtr;
-
-	while (p != NULL) {
-		if (p == child) {
-			if (p == q->tail)
-				q->tail = prev;
-			else
-				prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
-			q->size--;
-		}
-		prev = p;
-		p = p->nextSiblingPtr;
-	}
-}
-
-/* Return the head of the given queue. */
-procPtr peek(procQueue* q) {
-	if (q->head == NULL) {
-		return NULL;
-	}
-	return q->head;   
-}

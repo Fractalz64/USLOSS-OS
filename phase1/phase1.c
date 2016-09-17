@@ -26,6 +26,11 @@ void clockHandler();
 int readtime();
 void emptyProc(int);
 int block(int);
+void initProcQueue(procQueue*, int);
+void enq(procQueue*, procPtr);
+procPtr deq(procQueue*);
+procPtr peek(procQueue*);
+void removeChild(procQueue*, procPtr);
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -417,6 +422,8 @@ int join(int *status)
     if (Current->zapQueue.size != 0 ) {
         childPid = -1;
     }
+    
+    enableInterrupts(); // enable interrupts for the parent
     return childPid;
 } /* join */
 
@@ -454,7 +461,7 @@ void quit(int status)
     Current->quitStatus = status; // store the given status
     deq(&ReadyList[Current->priority-1]); // remove self from ready list
     if (Current->parentPtr != NULL) {
-        qRemoveChild(&Current->parentPtr->childrenQueue, Current); // remove self from parent's list of children
+        removeChild(&Current->parentPtr->childrenQueue, Current); // remove self from parent's list of children
         enq(&Current->parentPtr->deadChildrenQueue, Current); // add self to parent's dead children list
 
         if (Current->parentPtr->status == JBLOCKED) { // unblock parent
@@ -516,6 +523,7 @@ int zap(int pid) {
     }
 
     if (process->status == QUIT) { // CHECK
+        enableInterrupts();
         if (Current->zapQueue.size > 0) 
             return -1;
         else
@@ -525,6 +533,7 @@ int zap(int pid) {
     enq(&process->zapQueue, Current);
     block(ZBLOCKED);
 
+    enableInterrupts();
     if (Current->zapQueue.size > 0) {
         return -1;  
     }
@@ -540,6 +549,7 @@ int zap(int pid) {
    Side Effects - 
    ----------------------------------------------------------------------- */
 int isZapped() {
+    requireKernelMode("isZapped()");
     return (Current->zapQueue.size > 0);
 }
 
@@ -552,6 +562,7 @@ int isZapped() {
    Side Effects - ^
    ----------------------------------------------------------------------- */
 int getpid() {
+    requireKernelMode("getpid()");
     return Current->pid;  
 }
 
@@ -624,7 +635,7 @@ int blockMe(int newStatus) {
    ----------------------------------------------------------------------- */
 int unblockProc(int pid) {
     // test if in kernel mode; halt if in user mode
-    requireKernelMode("unblockProc(): called\n"); 
+    requireKernelMode("unblockProc()"); 
     disableInterrupts();
 
     int i = pid % MAXPROC; // get process
@@ -692,6 +703,10 @@ static void checkDeadlock()
    ----------------------------------------------------------------------- */
 void clockHandler(int dev, int unit)
 {
+    static int count = 0; // count how many times the clock handler is called
+    count++;
+    if (DEBUG && debugflag)
+        USLOSS_Console("clockhandler called %d times\n", count);
     timeSlice();
 } /* clockHandler */
 
@@ -706,6 +721,7 @@ void clockHandler(int dev, int unit)
    ----------------------------------------------------------------------- */
 int readtime()
 {
+    requireKernelMode("readtime()");
     return Current->cpuTime/1000;
 } /* readtime */
 
@@ -719,6 +735,7 @@ int readtime()
    Side Effects - none
    ----------------------------------------------------------------------- */
 int readCurStartTime() {
+    requireKernelMode("readCurStartTime()");
     return Current->timeStarted/1000;
 }
 
@@ -743,10 +760,7 @@ void timeSlice() {
     if (Current->sliceTime > TIMESLICE) { // current has exceeded its timeslice
         if (DEBUG && debugflag)
             USLOSS_Console("timeSlice(): time slicing\n");
-        // deq(&ReadyList[Current->priority-1]); // remove current from ready list
-        // Current->status = READY; 
         Current->sliceTime = 0; // reset slice time
-        // enq(&ReadyList[Current->priority-1], Current); // add to the back of the list
         dispatcher();
     }
     else
@@ -788,7 +802,7 @@ void emptyProc(int pid) {
     ProcTable[i].name[0] = 0;
   
     numProcs--;
-  //USLOSS_Console("Emptied %d", i);
+    enableInterrupts();
 }
 
 
@@ -858,6 +872,8 @@ void requireKernelMode(char *name)
    ----------------------------------------------------------------------- */
 void dumpProcesses()
 {
+    requireKernelMode("dumpProcesses()");
+
     const char *statusNames[7];
     statusNames[EMPTY] = "EMPTY";
     statusNames[READY] = "READY";
@@ -890,4 +906,92 @@ void dumpProcesses()
             ProcTable[i].priority, statusNames[ProcTable[i].status],
             ProcTable[i].childrenQueue.size, ProcTable[i].cpuTime, ProcTable[i].name);
     }
+}
+
+/* ------------------------------------------------------------------------
+  Below are functions that manipulate ProcQueue:
+    initProcQueue, enq, deq, removeChild and peek.
+   ----------------------------------------------------------------------- */
+
+/* Initialize the given procQueue */
+void initProcQueue(procQueue* q, int type) {
+  q->head = NULL;
+  q->tail = NULL;
+  q->size = 0;
+  q->type = type;
+}
+
+/* Add the given procPtr to the back of the given queue. */
+void enq(procQueue* q, procPtr p) {
+  if (q->head == NULL && q->tail == NULL) {
+    q->head = q->tail = p;
+  } else {
+    if (q->type == READYLIST)
+      q->tail->nextProcPtr = p;
+    else if (q->type == CHILDREN)
+      q->tail->nextSiblingPtr = p;
+    else if (q->type == ZAP) 
+      q->tail->nextZapPtr = p;
+    else
+      q->tail->nextDeadSibling = p;
+    q->tail = p;
+  }
+  q->size++;
+}
+
+/* Remove and return the head of the given queue. */
+procPtr deq(procQueue* q) {
+  procPtr temp = q->head;
+  if (q->head == NULL) {
+    return NULL;
+  }
+  if (q->head == q->tail) {
+    q->head = q->tail = NULL; 
+  }
+  else {
+    if (q->type == READYLIST)
+      q->head = q->head->nextProcPtr;  
+    else if (q->type == CHILDREN)
+      q->head = q->head->nextSiblingPtr;  
+    else if (q->type == ZAP) 
+      q->head = q->head->nextZapPtr;
+    else 
+      q->head = q->head->nextDeadSibling;  
+  }
+  q->size--;
+  return temp;
+}
+
+/* Remove the child process from the queue */
+void removeChild(procQueue* q, procPtr child) {
+  if (q->head == NULL || q->type != CHILDREN)
+    return;
+
+  if (q->head == child) {
+    deq(q);
+    return;
+  }
+
+  procPtr prev = q->head;
+  procPtr p = q->head->nextSiblingPtr;
+
+  while (p != NULL) {
+    if (p == child) {
+      if (p == q->tail)
+        q->tail = prev;
+      else
+        prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
+      q->size--;
+    }
+    prev = p;
+    p = p->nextSiblingPtr;
+  }
+}
+
+/* Return the head of the given queue. */
+procPtr peek(procQueue* q) {
+  if (q->head == NULL) {
+    return NULL;
+  }
+  return q->head;   
 }

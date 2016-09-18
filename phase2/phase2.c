@@ -20,7 +20,7 @@ void emptySlot(int);
 void disableInterrupts(void);
 void enableInterrupts(void);
 void requireKernelMode(char *);
-void initSlotQueue(slotQueue*, int);
+void initSlotQueue(slotQueue*);
 void enq(slotQueue*, slotPtr);
 slotPtr deq(slotQueue*);
 slotPtr peek(slotQueue*);
@@ -165,7 +165,7 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
 
     // if all the slots are taken, block caller until slots are avaliable
     if (box->slotsTaken == box->totalSlots) {
-        blockProc(FULLBOX);
+        blockMe(FULLBOX);
         disableInterrupts(); // disable interrupts again when it gets unblocked
 
         // return -3 if process zap'd or the mailbox released while blocked on the mailbox

@@ -22,7 +22,7 @@ struct mailbox {
     int       slotsTaken;
     int       slotSize;
     int       nextSlot;
-    slotPtr   slots;
+    slotQueue slots;
 };
 
 struct mailSlot {

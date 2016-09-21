@@ -32,6 +32,7 @@ struct mailSlot {
     int       slotID;
     slotPtr   nextSlotPtr;
     char      message[MAX_MESSAGE];
+    int       messageSize;
 };
 
 // define mailbox status constants
@@ -43,7 +44,8 @@ struct mailSlot {
 #define FULL 1
 
 // define process status constants
-#define FULLBOX 11
+#define FULL_BOX 11
+#define NO_MESSAGES 12
 
 struct psrBits {
     unsigned int curMode:1;

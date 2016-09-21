@@ -9,7 +9,8 @@
 #include <phase1.h>
 #include <phase2.h>
 #include <usloss.h>
-
+#include <stdio.h>
+#include <string.h>
 #include "message.h"
 
 /* ------------------------- Prototypes ----------------------------------- */
@@ -24,7 +25,6 @@ void initSlotQueue(slotQueue*);
 void enq(slotQueue*, slotPtr);
 slotPtr deq(slotQueue*);
 slotPtr peek(slotQueue*);
-
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -86,6 +86,7 @@ int start1(char *arg)
     // Create a process for start2, then block on a join until start2 quits
     if (DEBUG2 && debugflag2)
         USLOSS_Console("start1(): fork'ing start2 process\n");
+    int kid_pid, status;
     kid_pid = fork1("start2", start2, NULL, 4 * USLOSS_MIN_STACK, 1);
     if ( join(&status) != kid_pid ) {
         USLOSS_Console("start2(): join returned something other than ");
@@ -165,11 +166,12 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
 
     // if all the slots are taken, block caller until slots are avaliable
     if (box->slotsTaken == box->totalSlots) {
-        blockMe(FULLBOX);
+        blockMe(FULL_BOX);
         disableInterrupts(); // disable interrupts again when it gets unblocked
 
         // return -3 if process zap'd or the mailbox released while blocked on the mailbox
         if (isZapped() || box->status == INACTIVE) {
+            enableInterrupts(); // enable interrupts before return
             return -3;
         }
     }
@@ -178,6 +180,7 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     slotPtr slot = &MailSlotTable[nextSlotID % MAXSLOTS];
     slot->slotID = nextSlotID++;
     slot->status = FULL;
+    slot->messageSize = msg_size;
     numSlots++;
 
     // copy the message into the slot
@@ -186,6 +189,7 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     // add slot to the mailbox
     enq(&box->slots, slot);
 
+    enableInterrupts(); // enable interrupts before return
     return 0;
 } /* MboxSend */
 
@@ -201,6 +205,48 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
    ----------------------------------------------------------------------- */
 int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
 {
+    // disable interrupts and require kernel mode
+    disableInterrupts();
+    requireKernelMode("MboxCreate()");
+
+    // invalid mbox_id
+    if (mbox_id < 0)
+        return -1;
+
+    mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
+
+    // check for invalid arguments
+    if (box->status == INACTIVE || msg_ptr == NULL)
+        return -1;
+
+    // check if there are messages avaliable, otherwise block
+    if (box->slotsTaken == 0) {
+        blockMe(NO_MESSAGES);
+        disableInterrupts(); // disable interrupts again when it gets unblocked
+
+        // return -3 if process zap'd or the mailbox released while blocked on the mailbox
+        if (isZapped() || box->status == INACTIVE) {
+            enableInterrupts(); // enable interrupts before return
+            return -3;
+        }
+    }
+
+    // get the mailSlot
+    slotPtr slot = deq(&box->slots);
+
+    // check if they don't have enough room for the message
+    if (slot == NULL || slot->status == EMPTY || msg_size < slot->messageSize)
+        return -1;
+
+    // finally, copy the message
+    int size = slot->messageSize;
+    memcpy(msg_ptr, slot->message, size);
+
+    // free the mail slot
+    emptySlot(slot->slotID % MAXSLOTS);
+
+    enableInterrupts(); // enable interrupts before return
+    return size;
 } /* MboxReceive */
 
 

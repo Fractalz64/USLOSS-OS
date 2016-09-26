@@ -10,6 +10,8 @@
 #include <phase2.h>
 #include <usloss.h>
 #include <stdlib.h>
+#include <string.h>
+
 #include "message.h"
 
 /* ------------------------- Prototypes ----------------------------------- */
@@ -33,9 +35,9 @@ mboxProcPtr mboxdeq(mboxProcQueue*);
 
 int debugflag2 = 0;
 
-mboxProcQueue mboxProcTable[MAXMBOX];
+mboxProcQueue mboxProcTable[MAXPROC]; 
 
-mboxProcPtr Current;
+mboxProcPtr Current; // running process
 
 mboxProcPtr blockedProcs;
 
@@ -185,15 +187,15 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     if (box->status == INACTIVE || msg_size < 0 || msg_size > box->slotSize)
         return -1;
 
-    // Current mboxproc
-    mboxProc mproc;
-    mproc.nextMboxProc = NULL;
-    mproc.pid = getpid();
+    // // Current mboxproc
+    // mboxProc mproc;
+    // mproc.nextMboxProc = NULL;
+    // mproc.pid = getpid();
 
     // if all the slots are taken, block caller until slots are avaliable
     if (box->slotsTaken == box->totalSlots) {
-        // add to queue of blocked mbox processes
-        mboxenq(&mboxProcTable[mbox_id], &mproc);
+        // // add to queue of blocked mbox processes
+        // mboxenq(&mboxProcTable[mbox_id], &mproc);
 
         blockMe(FULL_BOX);
         disableInterrupts(); // disable interrupts again when it gets unblocked
@@ -205,8 +207,8 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
         }
     }
 
-    // unblock and remove from blocked mbox processes
-    unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
+    // // unblock and remove from blocked mbox processes
+    // unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
 
     // create slot for message
     slotPtr slot = &MailSlotTable[nextSlotID % MAXSLOTS];
@@ -252,14 +254,14 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
     if (box->status == INACTIVE || msg_ptr == NULL)
         return -1;
 
-    mboxProc mproc;
-    mproc.nextMboxProc = NULL;
-    mproc.pid = getpid();
+    // mboxProc mproc;
+    // mproc.nextMboxProc = NULL;
+    // mproc.pid = getpid();
 
     // check if there are messages avaliable, otherwise block
     if (box->slotsTaken == 0) {
         // add to queue of blocked
-        mboxenq(&mboxProcTable[mbox_id], &mproc);
+        // mboxenq(&mboxProcTable[mbox_id], &mproc);
 
         blockMe(NO_MESSAGES);
         disableInterrupts(); // disable interrupts again when it gets unblocked
@@ -271,8 +273,8 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
         }
     }
 
-    // unblock process
-    unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
+    // // unblock process
+    // unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
 
     // get the mailSlot
     slotPtr slot = deq(&box->slots);
@@ -326,6 +328,12 @@ void emptySlot(int i)
 } /* emptySlot */
 
 
+int check_io()
+{
+    return 0;
+}
+
+
 /* ------------------------------------------------------------------------
    Name - requireKernelMode
    Purpose - Checks if we are in kernel mode and prints an error messages
@@ -342,6 +350,43 @@ void requireKernelMode(char *name)
     }
 } /* requireKernelMode */
 
+
+/*
+ * Enables the interrupts.
+ */
+void enableInterrupts()
+{
+    // turn the interrupts ON iff we are in kernel mode
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
+        //not in kernel mode
+        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
+        USLOSS_Console("enable interrupts\n");
+        USLOSS_Halt(1);
+    } else
+        // We ARE in kernel mode
+        USLOSS_PsrSet( USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT );
+        // if (DEBUG && debugflag)
+        //     USLOSS_Console("Interrupts enabled.\n");
+} /* enableInterrupts */
+
+
+/*
+ * Disables the interrupts.
+ */
+void disableInterrupts()
+{
+    // turn the interrupts OFF iff we are in kernel mode
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
+        //not in kernel mode
+        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
+        USLOSS_Console("disable interrupts\n");
+        USLOSS_Halt(1);
+    } else
+        // We ARE in kernel mode
+        USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
+        // if (DEBUG && debugflag)
+        //     USLOSS_Console("Interrupts disabled.\n");
+} /* disableInterrupts */
 
 
 /* ------------------------------------------------------------------------
@@ -390,45 +435,6 @@ slotPtr peek(slotQueue* q) {
     }
     return q->head;   
 }
-
-
-/*
- * Enables the interrupts.
- */
-void enableInterrupts()
-{
-    // turn the interrupts ON iff we are in kernel mode
-    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
-        //not in kernel mode
-        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
-        USLOSS_Console("enable interrupts\n");
-        USLOSS_Halt(1);
-    } else
-        // We ARE in kernel mode
-        USLOSS_PsrSet( USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT );
-        // if (DEBUG && debugflag)
-        //     USLOSS_Console("Interrupts enabled.\n");
-} /* enableInterrupts */
-
-
-/*
- * Disables the interrupts.
- */
-void disableInterrupts()
-{
-    // turn the interrupts OFF iff we are in kernel mode
-    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
-        //not in kernel mode
-        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
-        USLOSS_Console("disable interrupts\n");
-        USLOSS_Halt(1);
-    } else
-        // We ARE in kernel mode
-        USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
-        // if (DEBUG && debugflag)
-        //     USLOSS_Console("Interrupts disabled.\n");
-} /* disableInterrupts */
-
 
 
 /* ------------------------------------------------------------------------

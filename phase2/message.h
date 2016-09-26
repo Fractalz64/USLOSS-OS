@@ -12,7 +12,7 @@ typedef struct mboxProcQueue mboxProcQueue;
 
 struct mboxProc {
     mboxProcPtr     nextMboxProc;
-    int           pid;               /* process id */
+    int             pid;               /* process id */
     //int             priority;
     //int             status;        /* READY, BLOCKED, QUIT, etc. */
     /* other fields as needed... */
@@ -33,7 +33,6 @@ struct slotQueue {
 
 struct mailbox {
     int       mboxID;
-    // other items as needed...
     int       status;
     int       totalSlots;
     int       slotsTaken;
@@ -47,7 +46,6 @@ struct mailbox {
 struct mailSlot {
     int       mboxID;
     int       status;
-    // other items as needed...
     int       slotID;
     slotPtr   nextSlotPtr;
     char      message[MAX_MESSAGE];

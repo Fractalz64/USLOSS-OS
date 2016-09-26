@@ -29,6 +29,7 @@ slotPtr peek(slotQueue*);
 void mboxinitProcQueue(mboxProcQueue*);
 void mboxenq(mboxProcQueue*, mboxProcPtr);
 mboxProcPtr mboxdeq(mboxProcQueue*);
+mboxProcPtr mboxpeek(mboxProcQueue*);
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -206,9 +207,6 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
         }
     }
 
-    // unblock and remove from blocked mbox processes
-    unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
-
     // create slot for message
     slotPtr slot = &MailSlotTable[nextSlotID % MAXSLOTS];
     slot->slotID = nextSlotID++;
@@ -223,6 +221,10 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     // add slot to the mailbox
     enq(&box->slots, slot);
 
+    // unblock and remove from blocked mbox processes
+    if (mboxpeek(&mboxProcTable[mbox_id]) != NULL)
+      unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
+    
     enableInterrupts(); // enable interrupts before return
     return 0;
 } /* MboxSend */
@@ -272,9 +274,6 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
         }
     }
 
-    // unblock process
-    unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
-
     // get the mailSlot
     slotPtr slot = deq(&box->slots);
 
@@ -287,6 +286,10 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
 
     // free the mail slot
     emptySlot(slot->slotID % MAXSLOTS);
+
+    // unblock process
+    if (mboxpeek(&mboxProcTable[mbox_id]) != NULL)
+      unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
 
     enableInterrupts(); // enable interrupts before return
     return size;

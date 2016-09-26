@@ -4,8 +4,25 @@
 typedef struct mailSlot *slotPtr;
 typedef struct mailbox   mailbox;
 typedef struct mailSlot   mailSlot;
-typedef struct mboxProc *mboxProcPtr;
 typedef struct slotQueue slotQueue;
+
+typedef struct mboxProc mboxProc;
+typedef struct mboxProc *mboxProcPtr;
+typedef struct mboxProcQueue mboxProcQueue;
+
+struct mboxProc {
+    mboxProcPtr     nextMboxProc;
+    int           pid;               /* process id */
+    //int             priority;
+    //int             status;        /* READY, BLOCKED, QUIT, etc. */
+    /* other fields as needed... */
+};
+
+struct mboxProcQueue {
+    mboxProcPtr head;
+    mboxProcPtr tail;
+    int size;
+};
 
 // queue for mailSlots
 struct slotQueue {
@@ -23,6 +40,8 @@ struct mailbox {
     int       slotSize;
     int       nextSlot;
     slotQueue slots;
+
+    mboxProcQueue mboxProcs;
 };
 
 struct mailSlot {

@@ -25,9 +25,19 @@ void enq(slotQueue*, slotPtr);
 slotPtr deq(slotQueue*);
 slotPtr peek(slotQueue*);
 
+void mboxinitProcQueue(mboxProcQueue*);
+void mboxenq(mboxProcQueue*, mboxProcPtr);
+mboxProcPtr mboxdeq(mboxProcQueue*);
+
 /* -------------------------- Globals ------------------------------------- */
 
 int debugflag2 = 0;
+
+mboxProcQueue mboxProcTable[MAXMBOX];
+
+mboxProcPtr Current;
+
+mboxProcPtr blockedProcs;
 
 // the mail boxes 
 mailbox MailBoxTable[MAXMBOX];
@@ -56,7 +66,6 @@ int start1(char *arg)
 {
     if (DEBUG2 && debugflag2)
         USLOSS_Console("start1(): at beginning\n");
-
     requireKernelMode("start1");
 
     // Disable interrupts
@@ -125,12 +134,25 @@ int MboxCreate(int slots, int slot_size)
     box->slotSize = slot_size;
     box->status = ACTIVE;
 
-    numBoxes++; // increment mailbox count
+    mboxinitProcQueue(&mboxProcTable[nextMboxID % MAXMBOX]);
 
+    numBoxes++; // increment mailbox count
 
     enableInterrupts(); // re-enable interrupts
     return box->mboxID;
 } /* MboxCreate */
+
+
+/* ------------------------------------------------------------------------
+   Name - MboxRelease
+   Purpose - 
+   Parameters - 
+   Returns - 
+   Side Effects -
+   ----------------------------------------------------------------------- */
+int MboxRelease(int mailboxID) {
+  return 0;
+}
 
 
 /* ------------------------------------------------------------------------
@@ -163,8 +185,16 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     if (box->status == INACTIVE || msg_size < 0 || msg_size > box->slotSize)
         return -1;
 
+    // Current mboxproc
+    mboxProc mproc;
+    mproc.nextMboxProc = NULL;
+    mproc.pid = getpid();
+
     // if all the slots are taken, block caller until slots are avaliable
     if (box->slotsTaken == box->totalSlots) {
+        // add to queue of blocked mbox processes
+        mboxenq(&mboxProcTable[mbox_id], &mproc);
+
         blockMe(FULL_BOX);
         disableInterrupts(); // disable interrupts again when it gets unblocked
 
@@ -175,6 +205,9 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
         }
     }
 
+    // unblock and remove from blocked mbox processes
+    unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
+
     // create slot for message
     slotPtr slot = &MailSlotTable[nextSlotID % MAXSLOTS];
     slot->slotID = nextSlotID++;
@@ -182,6 +215,7 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     slot->messageSize = msg_size;
     numSlots++;
 
+    box->slotsTaken++;
     // copy the message into the slot
     memcpy(slot->message, msg_ptr, msg_size);
 
@@ -218,8 +252,15 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
     if (box->status == INACTIVE || msg_ptr == NULL)
         return -1;
 
+    mboxProc mproc;
+    mproc.nextMboxProc = NULL;
+    mproc.pid = getpid();
+
     // check if there are messages avaliable, otherwise block
     if (box->slotsTaken == 0) {
+        // add to queue of blocked
+        mboxenq(&mboxProcTable[mbox_id], &mproc);
+
         blockMe(NO_MESSAGES);
         disableInterrupts(); // disable interrupts again when it gets unblocked
 
@@ -230,13 +271,15 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
         }
     }
 
+    // unblock process
+    unblockProc(mboxdeq(&mboxProcTable[mbox_id])->pid);
+
     // get the mailSlot
     slotPtr slot = deq(&box->slots);
 
     // check if they don't have enough room for the message
     if (slot == NULL || slot->status == EMPTY || msg_size < slot->messageSize)
         return -1;
-
     // finally, copy the message
     int size = slot->messageSize;
     memcpy(msg_ptr, slot->message, size);
@@ -346,4 +389,92 @@ slotPtr peek(slotQueue* q) {
         return NULL;
     }
     return q->head;   
+}
+
+
+/*
+ * Enables the interrupts.
+ */
+void enableInterrupts()
+{
+    // turn the interrupts ON iff we are in kernel mode
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
+        //not in kernel mode
+        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
+        USLOSS_Console("enable interrupts\n");
+        USLOSS_Halt(1);
+    } else
+        // We ARE in kernel mode
+        USLOSS_PsrSet( USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT );
+        // if (DEBUG && debugflag)
+        //     USLOSS_Console("Interrupts enabled.\n");
+} /* enableInterrupts */
+
+
+/*
+ * Disables the interrupts.
+ */
+void disableInterrupts()
+{
+    // turn the interrupts OFF iff we are in kernel mode
+    if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
+        //not in kernel mode
+        USLOSS_Console("Kernel Error: Not in kernel mode, may not ");
+        USLOSS_Console("disable interrupts\n");
+        USLOSS_Halt(1);
+    } else
+        // We ARE in kernel mode
+        USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
+        // if (DEBUG && debugflag)
+        //     USLOSS_Console("Interrupts disabled.\n");
+} /* disableInterrupts */
+
+
+
+/* ------------------------------------------------------------------------
+  Below are functions that manipulate mboxProcQueue:
+    initMboxProcQueue, enq, deq, removeChild and peek.
+   ----------------------------------------------------------------------- */
+
+/* Initialize the given mboxProcQueue */
+void mboxinitProcQueue(mboxProcQueue* q) {
+  q->head = NULL;
+  q->tail = NULL;
+  q->size = 0;
+}
+
+/* Add the given mboxProcPtr to the back of the given queue. */
+void mboxenq(mboxProcQueue* q, mboxProcPtr p) {
+  if (q->head == NULL && q->tail == NULL) 
+    q->head = q->tail = p;
+  else {
+    q->tail->nextMboxProc = p;
+    q->tail = p;
+  }
+  q->size++;
+}
+
+/* Remove and return the head of the given queue. */
+mboxProcPtr mboxdeq(mboxProcQueue* q) {
+  mboxProcPtr temp = q->head;
+  if (q->head == NULL) {
+    return NULL;
+  }
+  if (q->head == q->tail) {
+    q->head = q->tail = NULL; 
+  }
+  else {
+    q->head = q->head->nextMboxProc;
+    q->size--;
+  }
+  
+  return temp;
+}
+
+/* Return the head of the given queue. */
+mboxProcPtr mboxpeek(mboxProcQueue* q) {
+  if (q->head == NULL) {
+    return NULL;
+  }
+  return q->head;   
 }

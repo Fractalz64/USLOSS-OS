@@ -9,8 +9,7 @@
 #include <phase1.h>
 #include <phase2.h>
 #include <usloss.h>
-#include <stdio.h>
-#include <string.h>
+#include <stdlib.h>
 #include "message.h"
 
 /* ------------------------- Prototypes ----------------------------------- */

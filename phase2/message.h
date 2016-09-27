@@ -3,44 +3,37 @@
 
 typedef struct mailSlot *slotPtr;
 typedef struct mailbox   mailbox;
-typedef struct mailSlot   mailSlot;
-typedef struct slotQueue slotQueue;
-
+typedef struct mailSlot  mailSlot;
 typedef struct mboxProc mboxProc;
 typedef struct mboxProc *mboxProcPtr;
-typedef struct mboxProcQueue mboxProcQueue;
+typedef struct queue queue;
 
 struct mboxProc {
     mboxProcPtr     nextMboxProc;
-    int             pid;               /* process id */
-    //int             priority;
-    //int             status;        /* READY, BLOCKED, QUIT, etc. */
-    /* other fields as needed... */
+    int             pid;     // process ID
+    //int             status;            
+    void            *msg_ptr; // where to put recieved message
+    slotPtr         messageRecieved; // mail slot containing message we've recieved
 };
 
-struct mboxProcQueue {
-    mboxProcPtr head;
-    mboxProcPtr tail;
-    int size;
-};
+#define SLOTQUEUE 0
+#define PROCQUEUE 1
 
-// queue for mailSlots
-struct slotQueue {
-    slotPtr head;
-    slotPtr tail;
+struct queue {
+    void   *head;
+    void   *tail;
     int     size;
+    int     type; // tells what kind of pointers to use
 };
 
 struct mailbox {
     int       mboxID;
     int       status;
     int       totalSlots;
-    int       slotsTaken;
-    int       slotSize;
-    int       nextSlot;
-    slotQueue slots;
-
-    mboxProcQueue mboxProcs;
+    int       slotSize; 
+    queue     slots; // queue of mailSlots in this mailbox
+    queue     blockedProcsSend; // processes blocked on a send
+    queue     blockedProcsRecieve; // processes blocked on a recieve
 };
 
 struct mailSlot {
@@ -58,7 +51,7 @@ struct mailSlot {
 
 // mail slot status constants
 #define EMPTY 0
-#define FULL 1
+#define USED 1
 
 // define process status constants
 #define FULL_BOX 11

@@ -7,14 +7,12 @@ AR = ar
 COBJS = phase2.o
 CSRCS = ${COBJS:.o=.c}
 
-HDRS = message.h
-
-# When using your phase1 library:
-PHASELIB = phase1
-
-# When using one of Patrick's phase1 libraries
 #PHASE1LIB = patrickphase1debug
-#PHASE1LIB = patrickphase1
+PHASE1LIB = patrickphase1
+#PHASE1LIB = phase1
+#PHASE1LIB = phase1debug
+
+HDRS = message.h
 
 INCLUDE = ./usloss/include
 
@@ -23,7 +21,7 @@ CFLAGS = -Wall -g -std=gnu99 -I${INCLUDE} -I.
 UNAME := $(shell uname -s)
 
 ifeq ($(UNAME), Darwin)
-        CFLAGS += -D_XOPEN_SOURCE
+        #CFLAGS += -D_XOPEN_SOURCE
 endif
 
 LDFLAGS += -L./usloss/lib -L.
@@ -38,12 +36,15 @@ LIBS = -l$(PHASE1LIB) -lphase2 -lusloss
 $(TARGET):	$(COBJS)
 		$(AR) -r $@ $(COBJS) 
 
-$(TESTS):	$(TARGET) $(TESTDIR)/$$@.c p1.o
+$(TESTS):       $(TARGET) p1.o
 	$(CC) $(CFLAGS) -c $(TESTDIR)/$@.c
-	$(CC) $(LDFLAGS) -o $@ $@.o $(LIBS) p1.o
+	$(CC) $(LDFLAGS) -o $@ $(LIBS) $@.o $(LIBS) p1.o
+# $(LIBS) appears twice on previous line so startup can "find" start1
+# on Linux.  The first occurrence is not necessary on OS X
 
 clean:
-	rm -f $(COBJS) $(TARGET) core term*.out test*.o $(TESTS) p1.o
+	rm -f $(COBJS) $(TARGET) core term*.out test*.o test??.txt $(TESTS) \
+		p1.o term*in
 
 phase2.o:	message.h
 

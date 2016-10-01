@@ -27,6 +27,8 @@ void enq(queue*, void*);
 void *deq(queue*);
 void *peek(queue*);
 
+//void clockHandler2(dev);
+
 // void mboxinitProcQueue(mboxProcQueue*);
 // void mboxenq(mboxProcQueue*, mboxProcPtr);
 // mboxProcPtr mboxdeq(mboxProcQueue*);
@@ -84,6 +86,9 @@ int start1(char *arg)
 
     numBoxes = 0;
     numSlots = 0;
+
+    // need to do interrupt vector stuff
+    //USLOSS_IntVec[USLOSS_CLOCK_INT] = clockHandler2;
 
     enableInterrupts();
 
@@ -264,6 +269,25 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
     // get the mailbox
     mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
 
+    if (box->totalSlots == 0) {
+        mboxProc mproc;
+        mproc.nextMboxProc = NULL;
+        mproc.pid = getpid();
+        mproc.msg_ptr = NULL;
+        mproc.messageRecieved = NULL;
+        if (box->blockedProcsRecieve.size > 0) {
+            mboxProcPtr proc = (mboxProcPtr)deq(&box->blockedProcsRecieve);
+            if (DEBUG2 && debugflag2) 
+                USLOSS_Console("MboxReceive(): unblocking process %d that was blocked on send\n", proc->pid);
+            unblockProc(proc->pid);
+        }
+        else {
+            enq(&box->blockedProcsSend, &mproc);
+            blockMe(NO_MESSAGES);
+        }
+        return 0;
+    }
+
     // check for invalid arguments
     if (box->status == INACTIVE || msg_size < 0 || msg_size > box->slotSize) {
         if (DEBUG2 && debugflag2) 
@@ -297,7 +321,6 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
             return -3;
         }
     }
-
 
     // otherwise, create a new slot and add the message to it
     int slotID = createSlot(msg_ptr, msg_size);
@@ -343,13 +366,33 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
             USLOSS_Console("MboxReceive(): called with invalid mbox_id: %d, returning -1\n", mbox_id);
         return -1;
     }
-
     mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
+
+    if (box->totalSlots == 0) {
+        mboxProc mproc;
+        mproc.nextMboxProc = NULL;
+        mproc.pid = getpid();
+        mproc.msg_ptr = NULL;
+        mproc.messageRecieved = NULL;
+        if (box->blockedProcsSend.size > 0) {
+            mboxProcPtr proc = (mboxProcPtr)deq(&box->blockedProcsSend);
+            if (DEBUG2 && debugflag2) 
+                USLOSS_Console("MboxReceive(): unblocking process %d that was blocked on send\n", proc->pid);
+            unblockProc(proc->pid);
+        }
+        else {
+            enq(&box->blockedProcsRecieve, &mproc);
+            blockMe(NO_MESSAGES);
+        }
+        return 0;
+    }
 
     // check for invalid arguments
     if (box->status == INACTIVE || msg_ptr == NULL) {
         if (DEBUG2 && debugflag2) 
             USLOSS_Console("MboxReceive(): called with and invalid argument, returning -1\n", mbox_id);
+
+
         return -1;
     }
 
@@ -367,7 +410,6 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
 
         // add to queue of blocked procs on a recieve
         enq(&box->blockedProcsRecieve, &mproc);
-
         blockMe(NO_MESSAGES); // block
         disableInterrupts(); // disable interrupts again when it gets unblocked
 
@@ -412,6 +454,169 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
     enableInterrupts(); // enable interrupts before return
     return size;
 } /* MboxReceive */
+
+/* ------------------------------------------------------------------------
+   Name - MboxSend
+   Purpose - Put a message into a slot for the indicated mailbox.
+             Block the sending process if no slot available.
+   Parameters - mailbox id, pointer to data of msg, # of bytes in msg.
+   Returns - zero if successful, -1 if invalid args.
+   Side Effects - none.
+   ----------------------------------------------------------------------- */
+int MboxCondSend(int mbox_id, void *msg_ptr, int msg_size)
+{
+    // disable interrupts and require kernel mode
+    disableInterrupts();
+    requireKernelMode("MboxSend()");
+
+    // if the mail slot table overflows, that is an error that should halt USLOSS
+    if (numSlots == MAXSLOTS) {
+        //USLOSS_Console("Mail slot table overflow. Halting...\n");
+        return -2;
+    }
+
+    // invalid mbox_id
+    if (mbox_id < 0) {
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondSend(): called with invalid mbox_id: %d, returning -1\n", mbox_id);
+        return -1;
+    }
+
+    // get the mailbox
+    mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
+
+    // check for invalid arguments
+    if (box->status == INACTIVE || msg_size < 0 || msg_size > box->slotSize) {
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondSend(): called with and invalid argument, returning -1\n", mbox_id);
+        return -1;
+    }
+
+    // if all the slots are taken, block caller until slots are avaliable
+    if (box->slots.size == box->totalSlots) {
+        // init proc details
+
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondSend(): all slots are full, returning -2...\n");
+        return -2;
+        disableInterrupts(); // disable interrupts again when it gets unblocked
+
+        // return -3 if process zap'd or the mailbox released while blocked on the mailbox
+        if (isZapped() || box->status == INACTIVE) {
+            if (DEBUG2 && debugflag2) 
+                USLOSS_Console("MboxCondSend(): process was zapped while blocked on a send, returning -3\n");
+            enableInterrupts(); // enable interrupts before return
+            return -3;
+        }
+    }
+
+
+    // otherwise, create a new slot and add the message to it
+    int slotID = createSlot(msg_ptr, msg_size);
+    slotPtr slot = &MailSlotTable[slotID % MAXSLOTS];
+
+    // if there is a blocked process at this mailbox on a recieve, give it the message and unblock it
+    if (box->blockedProcsRecieve.size > 0) {
+        mboxProcPtr proc = (mboxProcPtr)deq(&box->blockedProcsRecieve);
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondSend(): giving message to blocked process %d\n", proc->pid);
+        proc->messageRecieved = slot;
+        unblockProc(proc->pid);
+    }
+
+    // otherwise, add slot to the mailbox
+    else
+        enq(&box->slots, slot); 
+
+    enableInterrupts(); // enable interrupts before return
+    return 0;
+} /* MboxSend */
+
+
+/* ------------------------------------------------------------------------
+   Name - MboxReceive
+   Purpose - Get a msg from a slot of the indicated mailbox.
+             Block the receiving process if no msg available.
+   Parameters - mailbox id, pointer to put data of msg, max # of bytes that
+                can be received.
+   Returns - actual size of msg if successful, -1 if invalid args.
+   Side Effects - none.
+   ----------------------------------------------------------------------- */
+int MboxCondReceive(int mbox_id, void *msg_ptr, int msg_size)
+{
+    // disable interrupts and require kernel mode
+    disableInterrupts();
+    requireKernelMode("MboxReceive()");
+    slotPtr slot;
+
+    // invalid mbox_id
+    if (mbox_id < 0) {
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondReceive(): called with invalid mbox_id: %d, returning -1\n", mbox_id);
+        return -1;
+    }
+
+    mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
+
+    // check for invalid arguments
+    if (box->status == INACTIVE || msg_ptr == NULL) {
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondReceive(): called with and invalid argument, returning -1\n", mbox_id);
+        return -1;
+    }
+
+    // block if there are no messages avaliable
+    if (box->slots.size == 0) {
+        // init proc details
+
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondReceive(): all slots are full, returning -2...\n");
+        return -2;
+
+        disableInterrupts(); // disable interrupts again when it gets unblocked
+
+        // return -3 if process zap'd or the mailbox released while blocked on the mailbox
+        if (isZapped() || box->status == INACTIVE) {
+            if (DEBUG2 && debugflag2) 
+                USLOSS_Console("MboxCondReceive(): either process was zapped, mailbox was freed, or we did not get the message, returning -3\n");
+            enableInterrupts(); // enable interrupts before return
+            return -3;
+        }
+
+        //slot = mproc.messageRecieved; // get the message
+    }
+
+    else
+        slot = deq(&box->slots); // get the mailSlot
+
+    // check if they don't have enough room for the message
+    if (slot == NULL || slot->status == EMPTY || msg_size < slot->messageSize) {
+        if (DEBUG2 && debugflag2 && (slot == NULL || slot->status == EMPTY)) 
+                USLOSS_Console("MboxCondReceiveMboxCondReceive(): mail slot null or empty, returning -1\n");
+        else if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondReceive(): no room for message, room provided: %d, message size: %d, returning -1\n", msg_size, slot->messageSize);
+        return -1;
+    }
+
+    // finally, copy the message
+    int size = slot->messageSize;
+    memcpy(msg_ptr, slot->message, size);
+
+    // free the mail slot
+    emptySlot(slot->slotID % MAXSLOTS);
+
+    // unblock any proc that is blocked on a send to this mailbox
+    if (box->blockedProcsSend.size > 0) {
+        mboxProcPtr proc = (mboxProcPtr)deq(&box->blockedProcsSend);
+        if (DEBUG2 && debugflag2) 
+            USLOSS_Console("MboxCondReceive(): unblocking process %d that was blocked on send\n", proc->pid);
+        unblockProc(proc->pid);
+    }
+
+    enableInterrupts(); // enable interrupts before return
+    return size;
+} /* MboxReceive */
+
 
 
 /* ------------------------------------------------------------------------
@@ -501,6 +706,10 @@ void disableInterrupts()
         //     USLOSS_Console("Interrupts disabled.\n");
 } /* disableInterrupts */
 
+int waitDevice(int type, int unit, int *status) 
+{
+    return 0;
+}
 
 /* ------------------------------------------------------------------------
   Functions for queue:

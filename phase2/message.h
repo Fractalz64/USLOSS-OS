@@ -11,9 +11,9 @@ typedef struct queue queue;
 struct mboxProc {
     mboxProcPtr     nextMboxProc;
     int             pid;     // process ID
-    //int             status;            
-    void            *msg_ptr; // where to put recieved message
-    slotPtr         messageRecieved; // mail slot containing message we've recieved
+    void            *msg_ptr; // where to put received message
+    int             msg_size;
+    slotPtr         messageReceived; // mail slot containing message we've received
 };
 
 #define SLOTQUEUE 0
@@ -33,7 +33,7 @@ struct mailbox {
     int       slotSize; 
     queue     slots; // queue of mailSlots in this mailbox
     queue     blockedProcsSend; // processes blocked on a send
-    queue     blockedProcsRecieve; // processes blocked on a recieve
+    queue     blockedProcsReceive; // processes blocked on a receive
 };
 
 struct mailSlot {

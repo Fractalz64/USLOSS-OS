@@ -2,6 +2,10 @@
 #include <phase1.h>
 #include <phase2.h>
 
+#define CLOCKBOX 0
+#define DISKBOX 1
+#define TERMBOX 3
+
 extern int debugflag2;
 extern void disableInterrupts(void);
 extern void enableInterrupts(void);
@@ -16,8 +20,20 @@ int waitDevice(int type, int unit, int *status)
     disableInterrupts();
     requireKernelMode("waitDevice()");
 
+    int box;
+    if (type == USLOSS_CLOCK_DEV)
+      box = CLOCKBOX;
+    else if (type == USLOSS_DISK_DEV)
+      box = DISKBOX;
+    else if (type == USLOSS_TERM_DEV)
+      box = TERMBOX;
+    else {
+      USLOSS_Console("waitDevice(): Invalid device type; %d. Halting...\n", type);
+      USLOSS_Halt(1);
+    }
+
     IOblocked++;
-    MboxReceive(IOmailboxes[type+unit], status, sizeof(int));
+    MboxReceive(IOmailboxes[box+unit], status, sizeof(int));
     IOblocked--;
 
     enableInterrupts(); // re-enable interrupts
@@ -54,7 +70,7 @@ void clockHandler2(int dev, void *arg)
     if (count == 5) {
       int status;
       USLOSS_DeviceInput(dev, 0, &status); // get the status
-      MboxCondSend(IOmailboxes[dev], &status, sizeof(int));
+      MboxCondSend(IOmailboxes[CLOCKBOX], &status, sizeof(int));
       count = 0;
     }
 
@@ -90,7 +106,7 @@ void diskHandler(int dev, void *arg)
     }
 
     // conditionally send to the device's mailbox
-    MboxCondSend(IOmailboxes[dev+unit], &status, sizeof(int));
+    MboxCondSend(IOmailboxes[DISKBOX+unit], &status, sizeof(int));
     enableInterrupts(); // re-enable interrupts
 } /* diskHandler */
 
@@ -122,7 +138,7 @@ void termHandler(int dev, void *arg)
     }
 
     // conditionally send to the device's mailbox
-    MboxCondSend(IOmailboxes[dev+unit], &status, sizeof(int));
+    MboxCondSend(IOmailboxes[TERMBOX+unit], &status, sizeof(int));
     enableInterrupts(); // re-enable interrupts
 } /* termHandler */
 

@@ -28,8 +28,6 @@ void enq(queue*, void*);
 void *deq(queue*);
 void *peek(queue*);
 
-//void clockHandler2(dev);
-
 /* -------------------------- Globals ------------------------------------- */
 
 int debugflag2 = 0;
@@ -82,13 +80,13 @@ int start1(char *arg)
     numSlots = 0;
 
     // allocate mailboxes for interrupt handlers
-    IOmailboxes[USLOSS_CLOCK_DEV] = MboxCreate(0, sizeof(int)); // one clock unit
-    IOmailboxes[USLOSS_TERM_INT] = MboxCreate(0, sizeof(int));  // 4 terminal units
-    IOmailboxes[USLOSS_TERM_INT+1] = MboxCreate(0, sizeof(int));
-    IOmailboxes[USLOSS_TERM_INT+2] = MboxCreate(0, sizeof(int));
-    IOmailboxes[USLOSS_TERM_INT+3] = MboxCreate(0, sizeof(int));
-    IOmailboxes[USLOSS_DISK_INT] = MboxCreate(0, sizeof(int));  // two disk units
-    IOmailboxes[USLOSS_DISK_INT+1] = MboxCreate(0, sizeof(int));
+    IOmailboxes[CLOCKBOX] = MboxCreate(0, sizeof(int)); // one clock unit
+    IOmailboxes[TERMBOX] = MboxCreate(0, sizeof(int));  // 4 terminal units
+    IOmailboxes[TERMBOX+1] = MboxCreate(0, sizeof(int));
+    IOmailboxes[TERMBOX+2] = MboxCreate(0, sizeof(int));
+    IOmailboxes[TERMBOX+3] = MboxCreate(0, sizeof(int));
+    IOmailboxes[DISKBOX] = MboxCreate(0, sizeof(int));  // two disk units
+    IOmailboxes[DISKBOX+1] = MboxCreate(0, sizeof(int));
 
     // init interrupt handlers
     USLOSS_IntVec[USLOSS_CLOCK_INT] = clockHandler2;

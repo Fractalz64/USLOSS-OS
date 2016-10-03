@@ -45,7 +45,7 @@ int waitDevice(int type, int unit, int *status)
 /* an error method to handle invalid syscalls */
 void nullsys(systemArgs *args)
 {
-    USLOSS_Console("nullsys(): Invalid syscall. Halting...\n");
+    USLOSS_Console("nullsys(): Invalid syscall %d. Halting...\n", args->number);
     USLOSS_Halt(1);
 } /* nullsys */
 

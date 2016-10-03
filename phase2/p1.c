@@ -24,7 +24,3 @@ p1_quit(int pid)
         USLOSS_Console("p1_quit() called: pid = %d\n", pid);
 } /* p1_quit */
 
-int 
-check_io() {
-	return 0;
-}

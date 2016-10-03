@@ -89,6 +89,10 @@ int start1(char *arg)
     IOmailboxes[USLOSS_TERM_INT+3] = MboxCreate(0, sizeof(int));
     IOmailboxes[USLOSS_DISK_INT] = MboxCreate(0, sizeof(int));  // two disk units
     IOmailboxes[USLOSS_DISK_INT+1] = MboxCreate(0, sizeof(int));
+/*
+    for (i = 0; i < 7; i++) {
+        IOmailboxes[i] = MboxCreate(0, sizeof(int));
+    }*/
 
     // init interrupt handlers
     USLOSS_IntVec[USLOSS_CLOCK_INT] = clockHandler2;
@@ -308,7 +312,15 @@ int send(int mbox_id, void *msg_ptr, int msg_size, int conditional)
                 USLOSS_Console("MboxSend(): blocking process %d on a 0 slot mailbox\n", mproc.pid);
             enq(&box->blockedProcsSend, &mproc);
             blockMe(NO_MESSAGES);
+
+            if (isZapped() || box->status == INACTIVE) {
+                if (DEBUG2 && debugflag2) 
+                    USLOSS_Console("MboxSend(): process %d was zapped while blocked on a send, returning -3\n", mproc.pid);
+                enableInterrupts(); // enable interrupts before return
+                return -3;
+            }      
         }
+
         enableInterrupts(); // re-enable interrupts
         return 0;
     }
@@ -444,6 +456,13 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
                 USLOSS_Console("MboxReceive(): blocking process %d on 0 slot mailbox\n", mproc.pid);
             enq(&box->blockedProcsReceive, &mproc);
             blockMe(NO_MESSAGES);
+
+            if (isZapped() || box->status == INACTIVE) {
+                if (DEBUG2 && debugflag2) 
+                    USLOSS_Console("MboxSend(): process %d was zapped while blocked on a send, returning -3\n", mproc.pid);
+                enableInterrupts(); // enable interrupts before return
+                return -3;
+            }      
         }
 
         enableInterrupts(); // re-enable interrupts
@@ -491,7 +510,6 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
             enableInterrupts(); // enable interrupts before return
             return -3;
         }
-
         slot = mproc.messageReceived; // get the message
     }
 

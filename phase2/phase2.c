@@ -260,6 +260,11 @@ int send(int mbox_id, void *msg_ptr, int msg_size, int conditional)
 
     // if the mail slot table overflows, that is an error that should halt USLOSS
     if (numSlots == MAXSLOTS) {
+        if (conditional) {
+            if (DEBUG2 && debugflag2) 
+                USLOSS_Console("No slots avaliable for conditional send to box %d, returning -2\n", mbox_id);
+            return -2;
+        }
         USLOSS_Console("Mail slot table overflow. Halting...\n");
         USLOSS_Halt(1);
     }
@@ -306,7 +311,15 @@ int send(int mbox_id, void *msg_ptr, int msg_size, int conditional)
                 USLOSS_Console("MboxSend(): blocking process %d on a 0 slot mailbox\n", mproc.pid);
             enq(&box->blockedProcsSend, &mproc);
             blockMe(NO_MESSAGES);
+
+            if (isZapped() || box->status == INACTIVE) {
+                if (DEBUG2 && debugflag2) 
+                    USLOSS_Console("MboxSend(): process %d was zapped while blocked on a send, returning -3\n", mproc.pid);
+                enableInterrupts(); // enable interrupts before return
+                return -3;
+            }      
         }
+
         enableInterrupts(); // re-enable interrupts
         return 0;
     }
@@ -419,12 +432,13 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
         return -1;
     }
     mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
-
+    int size;
     // handle 0 slot mailbox
     if (box->totalSlots == 0) {
         // if a process has sent, unblock it and get the message
         if (box->blockedProcsSend.size > 0) {
             mboxProcPtr proc = (mboxProcPtr)deq(&box->blockedProcsSend);
+            size = proc->msg_size;
             if (msg_ptr != NULL && proc->msg_ptr != NULL && proc->msg_size <= msg_size)
                 memcpy(msg_ptr, proc->msg_ptr, proc->msg_size);
             if (DEBUG2 && debugflag2) 
@@ -442,10 +456,18 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
                 USLOSS_Console("MboxReceive(): blocking process %d on 0 slot mailbox\n", mproc.pid);
             enq(&box->blockedProcsReceive, &mproc);
             blockMe(NO_MESSAGES);
+
+            if (isZapped() || box->status == INACTIVE) {
+                if (DEBUG2 && debugflag2) 
+                    USLOSS_Console("MboxSend(): process %d was zapped while blocked on a send, returning -3\n", mproc.pid);
+                enableInterrupts(); // enable interrupts before return
+                return -3;
+            }     
+             
         }
 
         enableInterrupts(); // re-enable interrupts
-        return 0;
+        return size;
     }
 
     // check for invalid arguments
@@ -489,7 +511,6 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
             enableInterrupts(); // enable interrupts before return
             return -3;
         }
-
         slot = mproc.messageReceived; // get the message
     }
 
@@ -507,7 +528,7 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
     }
 
     // finally, copy the message
-    int size = slot->messageSize;
+    size = slot->messageSize;
     memcpy(msg_ptr, slot->message, size);
 
     // free the mail slot
@@ -620,8 +641,6 @@ void enableInterrupts()
     } else
         // We ARE in kernel mode
         USLOSS_PsrSet( USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT );
-        // if (DEBUG && debugflag)
-        //     USLOSS_Console("Interrupts enabled.\n");
 } /* enableInterrupts */
 
 
@@ -639,8 +658,6 @@ void disableInterrupts()
     } else
         // We ARE in kernel mode
         USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_INT );
-        // if (DEBUG && debugflag)
-        //     USLOSS_Console("Interrupts disabled.\n");
 } /* disableInterrupts */
 
 

@@ -151,7 +151,7 @@ void syscallHandler(int dev, void *arg)
       USLOSS_Console("syscallHandler(): called\n");
 
     // call nullsys for now
-    nullsys((systemArgs)arg);
+    nullsys((systemArgs*)arg);
 } /* syscallHandler */
 
 /* Returns 1 if there are processes blocked on IO, 0 otherwise */

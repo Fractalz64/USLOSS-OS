@@ -433,12 +433,13 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
         return -1;
     }
     mailbox *box = &MailBoxTable[mbox_id % MAXMBOX];
-
+    int size;
     // handle 0 slot mailbox
     if (box->totalSlots == 0) {
         // if a process has sent, unblock it and get the message
         if (box->blockedProcsSend.size > 0) {
             mboxProcPtr proc = (mboxProcPtr)deq(&box->blockedProcsSend);
+            size = proc->msg_size;
             if (msg_ptr != NULL && proc->msg_ptr != NULL && proc->msg_size <= msg_size)
                 memcpy(msg_ptr, proc->msg_ptr, proc->msg_size);
             if (DEBUG2 && debugflag2) 
@@ -466,7 +467,7 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
         }
 
         enableInterrupts(); // re-enable interrupts
-        return 0;
+        return size;
     }
 
     // check for invalid arguments
@@ -527,7 +528,7 @@ int receive(int mbox_id, void *msg_ptr, int msg_size, int conditional)
     }
 
     // finally, copy the message
-    int size = slot->messageSize;
+    size = slot->messageSize;
     memcpy(msg_ptr, slot->message, size);
 
     // free the mail slot

@@ -118,7 +118,7 @@ void termHandler(int dev, void *arg)
     if (DEBUG2 && debugflag2)
       USLOSS_Console("termHandler(): called\n");
 
-    // make sure this is the disk device, return otherwise
+    // make sure this is the terminal device, return otherwise
     if (dev != USLOSS_TERM_DEV) {
       if (DEBUG2 && debugflag2)
         USLOSS_Console("termHandler(): called by other device, returning\n");
@@ -145,13 +145,29 @@ void termHandler(int dev, void *arg)
 
 void syscallHandler(int dev, void *arg)
 {
-    disableInterrupts();
-    requireKernelMode("syscallHandler()");
-   if (DEBUG2 && debugflag2)
+  disableInterrupts();
+  requireKernelMode("syscallHandler()");
+  if (DEBUG2 && debugflag2)
       USLOSS_Console("syscallHandler(): called\n");
 
-    // call nullsys for now
-    nullsys((systemArgs*)arg);
+  systemArgs *sysPtr = (systemArgs*) arg;
+
+  // make sure this is the system call dveice, return otherwise
+  if (dev != USLOSS_SYSCALL_INT) {
+    if (DEBUG2 && debugflag2) 
+      USLOSS_Console("sysCallHandler(): called by other device, returning\n");
+    return;
+  }
+
+  // check for correct system call number
+  if (sysPtr->number < 0 || sysPtr->number >= MAXSYSCALLS) {
+      USLOSS_Console("syscallHandler(): sys number %d is wrong.  Halting...\n", sysPtr->number);
+      USLOSS_Halt(1);
+  }
+
+  // call nullsys for now
+  nullsys((systemArgs*)arg);
+  enableInterrupts();
 } /* syscallHandler */
 
 /* Returns 1 if there are processes blocked on IO, 0 otherwise */

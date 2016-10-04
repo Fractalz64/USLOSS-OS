@@ -42,6 +42,9 @@ int numBoxes, numSlots;
 // next mailbox/slot id to be assigned
 int nextMboxID = 0, nextSlotID = 0, nextProc = 0;
 
+// system call vector
+void (*syscall_vec[MAXSYSCALLS])(systemArgs *args);
+
 /* -------------------------- Functions ----------------------------------- */
 
 /* ------------------------------------------------------------------------
@@ -93,6 +96,11 @@ int start1(char *arg)
     USLOSS_IntVec[USLOSS_DISK_INT] = diskHandler;
     USLOSS_IntVec[USLOSS_TERM_INT] = termHandler;
     USLOSS_IntVec[USLOSS_SYSCALL_INT] = syscallHandler;
+
+    // set all system calls to nullsys, fill next phase
+    for (i = 0; i < MAXSYSCALLS; i++) {
+        syscall_vec[i] = nullsys;
+    }
 
     enableInterrupts();
 

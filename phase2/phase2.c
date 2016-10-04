@@ -310,17 +310,6 @@ int send(int mbox_id, void *msg_ptr, int msg_size, int conditional)
     if (DEBUG2 && debugflag2) 
         USLOSS_Console("send(): called with mbox_id: %d, msg_ptr: %d, msg_size: %d, conditional: %d\n", mbox_id, msg_ptr, msg_size, conditional);
 
-    // if the mail slot table overflows, that is an error that should halt USLOSS
-    if (numSlots == MAXSLOTS) {
-        if (conditional) {
-            if (DEBUG2 && debugflag2) 
-                USLOSS_Console("No slots avaliable for conditional send to box %d, returning -2\n", mbox_id);
-            return -2;
-        }
-        USLOSS_Console("Mail slot table overflow. Halting...\n");
-        USLOSS_Halt(1);
-    }
-
     // invalid mbox_id
     if (mbox_id < 0 || mbox_id >= MAXMBOX) {
         if (DEBUG2 && debugflag2) 
@@ -389,6 +378,17 @@ int send(int mbox_id, void *msg_ptr, int msg_size, int conditional)
         }
         enableInterrupts(); // enable interrupts before return
         return 0;
+    }
+
+    // if the mail slot table overflows, that is an error that should halt USLOSS
+    if (numSlots == MAXSLOTS) {
+        if (conditional) {
+            if (DEBUG2 && debugflag2) 
+                USLOSS_Console("No slots avaliable for conditional send to box %d, returning -2\n", mbox_id);
+            return -2;
+        }
+        USLOSS_Console("Mail slot table overflow. Halting...\n");
+        USLOSS_Halt(1);
     }
 
     // create a new slot and add the message to it

@@ -15,7 +15,7 @@
 #define CHECKMODE {    \
     if (USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE) { \
         USLOSS_Console("Trying to invoke syscall from kernel\n"); \
-        halt(1);  \
+        USLOSS_Halt(1);  \
     }  \
 }
 
@@ -77,7 +77,7 @@ int Wait(int *pid, int *status)
 
     USLOSS_Syscall(&sysArg);
 
-    *pid = (int) sysArg.arg1;
+    *pid = (int) ((long)sysArg.arg1);
     *status = (int) sysArg.arg2;
     return (int) sysArg.arg4;
     

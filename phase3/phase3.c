@@ -25,8 +25,13 @@ start2(char *arg)
      * Data structure initialization as needed...
      */
 
-    // populate system call vec
     int i;
+    // populate proc table
+    for (i = 0; i < MAXPROC; i++) {
+        emptyProc(i);
+    }
+
+    // populate system call vec
     for (i = 0; i < USLOSS_MAX_SYSCALLS; i++) {
         systemCallVec[i] = nullsys3;
     }
@@ -34,12 +39,12 @@ start2(char *arg)
     systemCallVec[SYS_WAIT] = wait;
     systemCallVec[SYS_TERMINATE] = terminate;
     systemCallVec[SYS_SEMCREATE] = semCreate;
-    systemCallVec[SYS_SEMP] = 
-    systemCallVec[SYS_SEMV] = 
-    systemCallVec[SYS_SEMFREE] = 
-    systemCallVec[SYS_GETTIMEOFDAY] = 
-    systemCallVec[SYS_CPUTIME] = 
-    systemCallVec[SYS_GETPID] = 
+    systemCallVec[SYS_SEMP] = semP;
+    systemCallVec[SYS_SEMV] = sempV;
+    systemCallVec[SYS_SEMFREE] = semFree;
+    systemCallVec[SYS_GETTIMEOFDAY] = getTimeOfDay;
+    systemCallVec[SYS_CPUTIME] = cpuTime;
+    systemCallVec[SYS_GETPID] = getPID;
 
 
     /*
@@ -99,15 +104,21 @@ void spawn(systemArgs *args)
 
     int pid = spawnReal(name, func, arg, stack_size, priority);
 
+    if (stack_size < USLOSS_MIN_STACK) { 
+    	args->arg4 = -1;
+    }
+
     // terminate self if zapped
     if (isZapped())
         terminateReal(); // need to write this
 
     // switch to user mode
+  	setUserMode();
 
     // swtich back to kernel mode and put values for Spawn
     args->arg1 = pid;
-    args->arg4 = // this should be -1 if args are not correct but fork1 checks those so idk if we are supposed to do it here too, or what
+    args->arg4 = 0;// this should be -1 if args are not correct but fork1 checks those so idk if we are supposed to do it here too, or what
+    return;
 } /* spawn */
 
 
@@ -182,3 +193,165 @@ void requireKernelMode(char *name)
         USLOSS_Halt(1); 
     }
 } /* requireKernelMode */
+
+void emptyProc(int pid) {
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("emptyProc()"); 
+
+    int i = pid % MAXPROC;
+
+    ProcTable3[i].status = EMPTY; // set status to be open
+    ProcTable3[i].pid = -1; // set pid to -1 to show it hasn't been assigned
+    ProcTable3[i].nextProcPtr = NULL; // set pointers to null
+    ProcTable3[i].nextSiblingPtr = NULL;
+    ProcTable3[i].nextDeadSibling = NULL;
+    ProcTable3[i].startFunc = NULL;
+    ProcTable3[i].priority = -1;
+    ProcTable3[i].stack = NULL;
+    ProcTable3[i].stackSize = -1;
+    ProcTable3[i].parentPtr = NULL;
+    initProcQueue(&ProcTable3[i].childrenQueue, CHILDREN); 
+    initProcQueue(&ProcTable3[i].deadChildrenQueue, DEADCHILDREN); 
+    initProcQueue(&ProcTable3[i].zapQueue, ZAP); 
+    ProcTable3[i].zapStatus = 0;
+    ProcTable3[i].timeStarted = -1;
+    ProcTable3[i].cpuTime = -1;
+    ProcTable3[i].sliceTime = 0;
+    ProcTable3[i].name[0] = 0;
+
+    ProcTable3[i].mutex = MboxCreate(0,0);
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - setUserMode
+   Purpose - 
+   Parameters -
+   Side Effects - 
+   ------------------------------------------------------------------------ */
+void setUserMode()
+{
+    USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_MODE );
+}
+
+/* ------------------------------------------------------------------------
+   Name - wait
+   Purpose - 
+   Parameters -
+   Side Effects - 
+   ------------------------------------------------------------------------ */
+void wait(systemArgs *args)
+{
+	int pid;
+	int status;
+
+	pid = waitReal(&status);
+
+	args->arg1 = pid;
+	args->arg2 = status;
+
+}
+
+int waitReal(int *arg) 
+{
+	int pid = join(arg);
+
+	return pid;
+}
+
+void terminate(systemArgs *args)
+{
+	terminateReal(args->arg1);
+}
+
+void terminateReal(int status) 
+{
+
+    while (ProcTable3[pid%MAXPROC].childrenQueue.size > 0) {
+        procPtr3 child = deq(ProcTable3[pid%MAXPROC].childrenQueue);
+        emptyProc(child->pid);
+    }
+	emptyProc(getpid());
+	quit(status);
+}
+
+
+/* ------------------------------------------------------------------------
+  Below are functions that manipulate ProcQueue:
+    initProcQueue, enq, deq, removeChild and peek.
+   ----------------------------------------------------------------------- */
+
+/* Initialize the given procQueue */
+void initProcQueue(procQueue* q, int type) {
+  q->head = NULL;
+  q->tail = NULL;
+  q->size = 0;
+  q->type = type;
+}
+
+/* Add the given procPtr3 to the back of the given queue. */
+void enq(procQueue* q, procPtr3 p) {
+  if (q->head == NULL && q->tail == NULL) {
+    q->head = q->tail = p;
+  } else {
+    if (q->type == READYLIST)
+      q->tail->nextProcPtr = p;
+    else if (q->type == CHILDREN)
+      q->tail->nextSiblingPtr = p;
+    q->tail = p;
+  }
+  q->size++;
+}
+
+/* Remove and return the head of the given queue. */
+procPtr3 deq(procQueue* q) {
+  procPtr3 temp = q->head;
+  if (q->head == NULL) {
+    return NULL;
+  }
+  if (q->head == q->tail) {
+    q->head = q->tail = NULL; 
+  }
+  else {
+    if (q->type == READYLIST)
+      q->head = q->head->nextProcPtr;  
+    else if (q->type == CHILDREN)
+      q->head = q->head->nextSiblingPtr;  
+  }
+  q->size--;
+  return temp;
+}
+
+/* Remove the child process from the queue */
+void removeChild(procQueue* q, procPtr3 child) {
+  if (q->head == NULL || q->type != CHILDREN)
+    return;
+
+  if (q->head == child) {
+    deq(q);
+    return;
+  }
+
+  procPtr3 prev = q->head;
+  procPtr3 p = q->head->nextSiblingPtr;
+
+  while (p != NULL) {
+    if (p == child) {
+      if (p == q->tail)
+        q->tail = prev;
+      else
+        prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
+      q->size--;
+    }
+    prev = p;
+    p = p->nextSiblingPtr;
+  }
+}
+
+/* Return the head of the given queue. */
+procPtr3 peek(procQueue* q) {
+  if (q->head == NULL) {
+    return NULL;
+  }
+  return q->head;   
+}

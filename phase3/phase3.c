@@ -3,9 +3,34 @@
 #include <phase2.h>
 #include <phase3.h>
 #include <usyscall.h>
+#include <sems.h>
+#include <string.h>
 
 /* ------------------------- Prototypes ----------------------------------- */
 void requireKernelMode(char *);
+void nullsys3(systemArgs *);
+void spawn(systemArgs *);
+void wait(systemArgs *);
+void terminate(systemArgs *);
+void semCreate(systemArgs *);
+void semP(systemArgs *);
+void semV(systemArgs *);
+void semFree(systemArgs *);
+void getTimeOfDay(systemArgs *);
+void cpuTime(systemArgs *);
+void getPID(systemArgs *);
+int spawnReal(char *, int(*)(char *), char *, int, int);
+int spawnLaunch(char *);
+int waitReal(int *);
+void terminateReal(int);
+void emptyProc(int);
+void setUserMode();
+void initProcQueue(procQueue*, int);
+void enq(procQueue*, procPtr3);
+procPtr3 deq(procQueue*);
+procPtr3 peek(procQueue*);
+void removeChild(procQueue*, procPtr3);
+extern int start3();
 
 /* -------------------------- Globals ------------------------------------- */
 int sems[MAXSEMS];
@@ -40,7 +65,7 @@ start2(char *arg)
     systemCallVec[SYS_TERMINATE] = terminate;
     systemCallVec[SYS_SEMCREATE] = semCreate;
     systemCallVec[SYS_SEMP] = semP;
-    systemCallVec[SYS_SEMV] = sempV;
+    systemCallVec[SYS_SEMV] = semV;
     systemCallVec[SYS_SEMFREE] = semFree;
     systemCallVec[SYS_GETTIMEOFDAY] = getTimeOfDay;
     systemCallVec[SYS_CPUTIME] = cpuTime;
@@ -83,6 +108,7 @@ start2(char *arg)
      */
     pid = waitReal(&status);
 
+    return pid;
 } /* start2 */
 
 
@@ -90,7 +116,7 @@ start2(char *arg)
    Name - spawn
    Purpose - Extracts arguments and checks for correctness.
    Parameters - systemArgs containing arguments.
-   Returns - 
+   Returns - nothing, but it changes the systemArgs
    ----------------------------------------------------------------------- */
 void spawn(systemArgs *args) 
 {
@@ -98,28 +124,24 @@ void spawn(systemArgs *args)
 
     int (*func)(char *) = args->arg1;
     char *arg = args->arg2;
-    int stack_size = (int) args->arg3;
-    int priority = (int) args->arg4;    
+    int stack_size = (int) ((long)args->arg3);
+    int priority = (int) ((long)args->arg4);    
     char *name = (char *)(args->arg5);
 
     int pid = spawnReal(name, func, arg, stack_size, priority);
-
-    if (stack_size < USLOSS_MIN_STACK) { 
-    	args->arg4 = -1;
-    }
+    int status = 0;
 
     // terminate self if zapped
     if (isZapped())
-        terminateReal(); // need to write this
+        terminateReal(1); 
 
     // switch to user mode
   	setUserMode();
 
     // swtich back to kernel mode and put values for Spawn
-    args->arg1 = pid;
-    args->arg4 = 0;// this should be -1 if args are not correct but fork1 checks those so idk if we are supposed to do it here too, or what
-    return;
-} /* spawn */
+    args->arg1 = &pid;
+    args->arg4 = &status;// this should be -1 if args are not correct but fork1 checks those so idk if we are supposed to do it here too, or what
+} 
 
 
 /* ------------------------------------------------------------------------
@@ -129,18 +151,19 @@ void spawn(systemArgs *args)
    Parameters - 
    Returns - 
    ----------------------------------------------------------------------- */
-void spawnLaunch(char startArg) {
+int spawnLaunch(char *startArg) {
     requireKernelMode("spawnLaunch");
 
     // now the process is running so we can get its pid and set up its stuff
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC]; 
     proc->pid = getpid();
-    proc->mbox = &MboxCreate(0, 0); // create proc's 0 slot mailbox
+    proc->mboxID = MboxCreate(0, 0); // create proc's 0 slot mailbox
 
     // now block so we can get info from spawnReal
-    Send(proc->mbox->mboxID, 0, 0);
+    MboxSend(proc->mboxID, 0, 0);
 
     // switch to user mode
+    setUserMode();
 
     // call the function to start the process
     // this should return the result to launch in phase1
@@ -166,16 +189,181 @@ int spawnReal(char *name, int (*func)(char *), char *arg, int stack_size, int pr
         return -1;
 
     // now we have the pid, we can access the proc table entry created by spawnLaunch
-    procPtr3 proc = ProcTable3[pid % MAXPROC]; 
+    procPtr3 proc = &ProcTable3[pid % MAXPROC]; 
 
     // give proc its start function
     proc->startFunc = func;
 
     // unblock the process so spawnLaunch can start it
-    Receive(proc->mbox->mboxID, 0, 0);
+    MboxReceive(proc->mboxID, 0, 0);
 
     return pid;
-} /* spawnReal */
+} 
+
+
+/* ------------------------------------------------------------------------
+   Name - wait
+   Purpose - waits for a child process to terminate
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void wait(systemArgs *args)
+{
+	int *pid = args->arg1;
+	int *status = args->arg2;
+
+	*pid = waitReal(status);
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - waitReal
+   Purpose - calls join and returns pid of joined child
+   Parameters - pointer to child's exit status to give to join
+   Returns - pid of joined child
+   ------------------------------------------------------------------------ */
+int waitReal(int *status) 
+{
+	int pid = join(status);
+	return pid;
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - terminate
+   Purpose - terminates the invoking process and all of its children
+   Parameters - termination code
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void terminate(systemArgs *args)
+{
+    int status = (int)((long)args->arg1);
+	terminateReal(status);
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - terminateReal
+   Purpose - terminates the invoking process and all of its children
+   Parameters - termination code
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void terminateReal(int status) 
+{
+
+    procPtr3 proc = &ProcTable3[getpid() % MAXPROC];
+    while (proc->childrenQueue.size > 0) {
+        procPtr3 child = deq(&proc->childrenQueue);
+        zap(child->pid);
+    }
+    emptyProc(getpid());
+    quit(status);
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semCreate
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void semCreate(systemArgs *args)
+{
+
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semP
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void semP(systemArgs *args)
+{
+
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semV
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void semV(systemArgs *args)
+{
+
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semFree
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void semFree(systemArgs *args)
+{
+
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - getTimeOfDay
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void getTimeOfDay(systemArgs *args)
+{
+
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - cpuTime
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void cpuTime(systemArgs *args)
+{
+
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - getPID
+   Purpose - 
+   Parameters - systemArgs containing arguments
+   Returns - nothing
+   ------------------------------------------------------------------------ */
+void getPID(systemArgs *args)
+{
+
+}
+
+
+/* an error method to handle invalid syscalls */
+void nullsys3(systemArgs *args)
+{
+    USLOSS_Console("nullsys(): Invalid syscall %d. Terminating...\n", args->number);
+    terminateReal(getpid());
+} /* nullsys */
+
+
+void emptyProc(int pid) {
+    // test if in kernel mode; halt if in user mode
+    requireKernelMode("emptyProc()"); 
+
+    int i = pid % MAXPROC;
+
+    ProcTable3[i].pid = -1; 
+    ProcTable3[i].mboxID = -1;
+    ProcTable3[i].startFunc = NULL;
+    ProcTable3[i].nextProcPtr = NULL; 
+}
 
 
 /* ------------------------------------------------------------------------
@@ -192,87 +380,18 @@ void requireKernelMode(char *name)
              name, getpid());
         USLOSS_Halt(1); 
     }
-} /* requireKernelMode */
-
-void emptyProc(int pid) {
-    // test if in kernel mode; halt if in user mode
-    requireKernelMode("emptyProc()"); 
-
-    int i = pid % MAXPROC;
-
-    ProcTable3[i].status = EMPTY; // set status to be open
-    ProcTable3[i].pid = -1; // set pid to -1 to show it hasn't been assigned
-    ProcTable3[i].nextProcPtr = NULL; // set pointers to null
-    ProcTable3[i].nextSiblingPtr = NULL;
-    ProcTable3[i].nextDeadSibling = NULL;
-    ProcTable3[i].startFunc = NULL;
-    ProcTable3[i].priority = -1;
-    ProcTable3[i].stack = NULL;
-    ProcTable3[i].stackSize = -1;
-    ProcTable3[i].parentPtr = NULL;
-    initProcQueue(&ProcTable3[i].childrenQueue, CHILDREN); 
-    initProcQueue(&ProcTable3[i].deadChildrenQueue, DEADCHILDREN); 
-    initProcQueue(&ProcTable3[i].zapQueue, ZAP); 
-    ProcTable3[i].zapStatus = 0;
-    ProcTable3[i].timeStarted = -1;
-    ProcTable3[i].cpuTime = -1;
-    ProcTable3[i].sliceTime = 0;
-    ProcTable3[i].name[0] = 0;
-
-    ProcTable3[i].mutex = MboxCreate(0,0);
-}
+} 
 
 
 /* ------------------------------------------------------------------------
    Name - setUserMode
-   Purpose - 
-   Parameters -
-   Side Effects - 
+   Purpose - switches to user mode
+   Parameters - none
+   Side Effects - none
    ------------------------------------------------------------------------ */
 void setUserMode()
 {
     USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_MODE );
-}
-
-/* ------------------------------------------------------------------------
-   Name - wait
-   Purpose - 
-   Parameters -
-   Side Effects - 
-   ------------------------------------------------------------------------ */
-void wait(systemArgs *args)
-{
-	int pid;
-	int status;
-
-	pid = waitReal(&status);
-
-	args->arg1 = pid;
-	args->arg2 = status;
-
-}
-
-int waitReal(int *arg) 
-{
-	int pid = join(arg);
-
-	return pid;
-}
-
-void terminate(systemArgs *args)
-{
-	terminateReal(args->arg1);
-}
-
-void terminateReal(int status) 
-{
-
-    while (ProcTable3[pid%MAXPROC].childrenQueue.size > 0) {
-        procPtr3 child = deq(ProcTable3[pid%MAXPROC].childrenQueue);
-        emptyProc(child->pid);
-    }
-	emptyProc(getpid());
-	quit(status);
 }
 
 

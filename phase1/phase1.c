@@ -35,7 +35,7 @@ void removeChild(procQueue*, procPtr);
 /* -------------------------- Globals ------------------------------------- */
 
 // Patrick's debugging global variable...
-int debugflag = 0;
+int debugflag = 1;
 
 // the process table
 procStruct ProcTable[MAXPROC];
@@ -407,15 +407,22 @@ int join(int *status)
 
     // if current has no dead children, block self and wait.
     if (Current->deadChildrenQueue.size == 0) {
-        block(JBLOCKED);
         if (DEBUG && debugflag)
-            USLOSS_Console("pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
+            USLOSS_Console("join(): pid %d blocked at priority %d \n\n" , Current->pid, Current->priority - 1);
+        block(JBLOCKED);
     }
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("join(): pid %d unblocked, dead child queue size = %d \n" , Current->pid, Current->deadChildrenQueue.size);
 
     // get the earliest dead child
     procPtr child = deq(&Current->deadChildrenQueue);
-    *status = child->quitStatus;
     int childPid = child->pid;
+    *status = child->quitStatus;
+
+    if (DEBUG && debugflag)
+        USLOSS_Console("join(): got child pid = %d, quit status = %d\n\n" , childPid, *status);
+
     // put child to rest
     emptyProc(childPid);
 
@@ -444,7 +451,7 @@ void quit(int status)
     disableInterrupts(); 
 
     if (DEBUG && debugflag)
-        USLOSS_Console("quit(): quitting process pid = %d\n", Current->pid);
+        USLOSS_Console("quit(): quitting process pid = %d, parent is %d\n", Current->pid, Current->parentPtr->pid);
 
     // print error message and halt if process with active children calls quit
     // loop though children to find if any are active

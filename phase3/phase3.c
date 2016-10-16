@@ -3,6 +3,7 @@
 #include <phase2.h>
 #include <phase3.h>
 #include <usyscall.h>
+#include <libuser.h>
 #include <sems.h>
 #include <string.h>
 
@@ -23,14 +24,14 @@ int spawnReal(char *, int(*)(char *), char *, int, int);
 int spawnLaunch(char *);
 int waitReal(int *);
 void terminateReal(int);
-void emptyProc(int);
+void emptyProc3(int);
 void initProc(int);
 void setUserMode();
-void initProcQueue(procQueue*, int);
-void enq(procQueue*, procPtr3);
-procPtr3 deq(procQueue*);
-procPtr3 peek(procQueue*);
-void removeChild(procQueue*, procPtr3);
+void initProcQueue3(procQueue*, int);
+void enq3(procQueue*, procPtr3);
+procPtr3 deq3(procQueue*);
+procPtr3 peek3(procQueue*);
+void removeChild3(procQueue*, procPtr3);
 extern int start3();
 
 /* -------------------------- Globals ------------------------------------- */
@@ -56,7 +57,7 @@ start2(char *arg)
     int i;
     // populate proc table
     for (i = 0; i < MAXPROC; i++) {
-        emptyProc(i);
+        emptyProc3(i);
     }
 
     // populate system call vec
@@ -112,7 +113,11 @@ start2(char *arg)
      */
     pid = waitReal(&status);
 
-    return pid;
+    if (debug3)
+        USLOSS_Console("Quitting start2...\n");
+
+    quit(pid);
+    return -1;
 } /* start2 */
 
 
@@ -126,9 +131,6 @@ void spawn(systemArgs *args)
 {
     requireKernelMode("spawn");
 
-    if (debug3)
-        USLOSS_Console("in spawn...\n");
-
     int (*func)(char *) = args->arg1;
     char *arg = args->arg2;
     int stack_size = (int) ((long)args->arg3);
@@ -136,7 +138,7 @@ void spawn(systemArgs *args)
     char *name = (char *)(args->arg5);
 
     if (debug3)
-        USLOSS_Console("spawn: args are: name = %s, stack size = %d, priority = %d\n", name, stack_size, priority);
+        USLOSS_Console("spawn(): args are: name = %s, stack size = %d, priority = %d\n", name, stack_size, priority);
 
     int pid = spawnReal(name, func, arg, stack_size, priority);
     int status = 0;
@@ -149,8 +151,8 @@ void spawn(systemArgs *args)
   	setUserMode();
 
     // swtich back to kernel mode and put values for Spawn
-    args->arg1 = &pid;
-    args->arg4 = &status;// this should be -1 if args are not correct but fork1 checks those so idk if we are supposed to do it here too, or what
+    args->arg1 = (void *) ((long)pid);
+    args->arg4 = (void *) ((long)status);
 } 
 
 
@@ -165,14 +167,17 @@ int spawnLaunch(char *startArg) {
     requireKernelMode("spawnLaunch");
 
     if (debug3)
-        USLOSS_Console("in spawnLaunch\n");
+        USLOSS_Console("spawnLaunch(): launched pid = %d\n", getpid());
 
-
+    // get the proc info
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC]; 
 
     // if spawnReal hasn't done it yet, set up proc table entry
-    if (proc->pid == -1) 
-        initProc(proc->pid);
+    if (proc->pid < 0) {
+        if (debug3)
+            USLOSS_Console("spawnLaunch(): initializing proc table entry for pid %d\n", getpid());
+        initProc(getpid());
+    }
 
     // block until spawnReal is done
     MboxSend(proc->mboxID, 0, 0);
@@ -180,10 +185,16 @@ int spawnLaunch(char *startArg) {
     // switch to user mode
     setUserMode();
 
-    // call the function to start the process
-    proc->startFunc(startArg);
+    if (debug3)
+        USLOSS_Console("spawnLaunch(): starting process %d...\n", proc->pid);
 
-    //terminate(0);
+    // call the function to start the process
+    int status = proc->startFunc(startArg);
+
+    if (debug3)
+        USLOSS_Console("spawnLaunch(): terminating process %d with status %d\n", proc->pid, status);
+
+    Terminate(status); // terminate the process if it hasn't terminated itself
     return 0;
 }
 
@@ -199,24 +210,27 @@ int spawnReal(char *name, int (*func)(char *), char *arg, int stack_size, int pr
     requireKernelMode("spawnReal");
 
     if (debug3)
-        USLOSS_Console("in spawnReal\n");
+        USLOSS_Console("spawnReal(): forking process %s... \n", name);
 
     // fork the process and get its pid
     int pid = fork1(name, spawnLaunch, arg, stack_size, priority);
 
     if (debug3)
-        USLOSS_Console("spawnReal(): process name = %s, pid = %d\n", name, pid);
+        USLOSS_Console("spawnReal(): forked process name = %s, pid = %d\n", name, pid);
 
     // return -1 if fork failed
     if (pid < 0)
         return -1;
 
-    // now we have the pid, we can set up the proc table entry
+    // now we have the pid, we can get the proc table entry
     procPtr3 proc = &ProcTable3[pid % MAXPROC]; 
 
     // if spawnLaunch hasn't done it yet, set up proc table entry
-    if (proc->pid == -1) 
-        initProc(proc->pid);
+    if (proc->pid < 0) {
+        if (debug3)
+            USLOSS_Console("spawnReal(): initializing proc table entry for pid %d\n", pid);
+        initProc(pid);
+    }
     
     proc->startFunc = func; // give proc its starting function
 
@@ -238,7 +252,17 @@ void wait(systemArgs *args)
     requireKernelMode("wait");
 
 	int *status = args->arg2;
-	args->arg1 = (void *) waitReal(status);
+    int pid = waitReal(status);
+
+    if (debug3) {
+        USLOSS_Console("wait(): joined with child pid = %d, status = %d\n", pid, *status);
+    }
+
+    //args->arg1 = (void *) ((long)waitReal(status));
+    args->arg1 = (void *) ((long) pid);
+    args->arg2 = (void *) ((long) *status);
+    args->arg4 = (void *) ((long) 0);
+
     // switch back to user mode
     setUserMode();
 }
@@ -289,13 +313,11 @@ void terminateReal(int status)
     requireKernelMode("terminateReal");
 
     if (debug3)
-        USLOSS_Console("in terminateReal, status = %d\n", status);
+        USLOSS_Console("terminateReal(): terminating pid %d, status = %d\n", getpid(), status);
 
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC];
-    USLOSS_Console("child qeue size = %d\n", proc->childrenQueue.size);
     while (proc->childrenQueue.size > 0) {
-        USLOSS_Console("ndfndjfj\n");
-        procPtr3 child = deq(&proc->childrenQueue);
+        procPtr3 child = deq3(&proc->childrenQueue);
         zap(child->pid);
     }
     quit(status);
@@ -404,12 +426,12 @@ void initProc(int pid) {
     ProcTable3[i].mboxID = MboxCreate(0, 0);
     ProcTable3[i].startFunc = NULL;
     ProcTable3[i].nextProcPtr = NULL; 
-    initProcQueue(&ProcTable3[i].childrenQueue, CHILDREN);
+    initProcQueue3(&ProcTable3[i].childrenQueue, CHILDREN);
 }
 
 
 /* empties proc struct */
-void emptyProc(int pid) {
+void emptyProc3(int pid) {
     requireKernelMode("emptyProc()"); 
 
     int i = pid % MAXPROC;
@@ -456,7 +478,7 @@ void setUserMode()
    ----------------------------------------------------------------------- */
 
 /* Initialize the given procQueue */
-void initProcQueue(procQueue* q, int type) {
+void initProcQueue3(procQueue* q, int type) {
   q->head = NULL;
   q->tail = NULL;
   q->size = 0;
@@ -464,7 +486,7 @@ void initProcQueue(procQueue* q, int type) {
 }
 
 /* Add the given procPtr3 to the back of the given queue. */
-void enq(procQueue* q, procPtr3 p) {
+void enq3(procQueue* q, procPtr3 p) {
   if (q->head == NULL && q->tail == NULL) {
     q->head = q->tail = p;
   } else {
@@ -478,7 +500,7 @@ void enq(procQueue* q, procPtr3 p) {
 }
 
 /* Remove and return the head of the given queue. */
-procPtr3 deq(procQueue* q) {
+procPtr3 deq3(procQueue* q) {
   procPtr3 temp = q->head;
   if (q->head == NULL) {
     return NULL;
@@ -497,12 +519,12 @@ procPtr3 deq(procQueue* q) {
 }
 
 /* Remove the child process from the queue */
-void removeChild(procQueue* q, procPtr3 child) {
+void removeChild3(procQueue* q, procPtr3 child) {
   if (q->head == NULL || q->type != CHILDREN)
     return;
 
   if (q->head == child) {
-    deq(q);
+    deq3(q);
     return;
   }
 
@@ -523,7 +545,7 @@ void removeChild(procQueue* q, procPtr3 child) {
 }
 
 /* Return the head of the given queue. */
-procPtr3 peek(procQueue* q) {
+procPtr3 peek3(procQueue* q) {
   if (q->head == NULL) {
     return NULL;
   }

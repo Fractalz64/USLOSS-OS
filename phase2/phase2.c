@@ -667,7 +667,7 @@ void requireKernelMode(char *name)
     if( (USLOSS_PSR_CURRENT_MODE & USLOSS_PsrGet()) == 0 ) {
         USLOSS_Console("%s: called while in user mode, by process %d. Halting...\n", 
              name, getpid());
-        USLOSS_Halt(1); // from phase1 pdf
+        USLOSS_Halt(1); 
     }
 } /* requireKernelMode */
 

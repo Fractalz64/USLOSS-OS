@@ -49,7 +49,6 @@ int Spawn(char *name, int (*func)(char *), char *arg, int stack_size,
     sysArg.arg5 = name;
 
     USLOSS_Syscall(&sysArg);
-    USLOSS_Console("done with spawn");
 
     *pid = (int) ((long)sysArg.arg1);
     return (int) ((long)sysArg.arg4);
@@ -80,7 +79,6 @@ int Wait(int *pid, int *status)
 
     *pid = (int) ((long)sysArg.arg1);
     *status = (int) ((long)sysArg.arg2);
-    USLOSS_Console("done with wait");
     return (int) ((long)sysArg.arg4);
 } /* end of Wait */
 
@@ -98,7 +96,15 @@ int Wait(int *pid, int *status)
  */
 void Terminate(int status)
 {
-    
+    systemArgs sysArg;
+
+    CHECKMODE;
+    sysArg.number = SYS_TERMINATE;
+    sysArg.arg1 = (void *) ((long)status);
+
+    USLOSS_Syscall(&sysArg);
+
+    // return (int) ((long)sysArg.arg1);
 } /* end of Terminate */
 
 

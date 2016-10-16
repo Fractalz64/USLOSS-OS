@@ -24,6 +24,7 @@ int spawnLaunch(char *);
 int waitReal(int *);
 void terminateReal(int);
 void emptyProc(int);
+void initProc(int);
 void setUserMode();
 void initProcQueue(procQueue*, int);
 void enq(procQueue*, procPtr3);
@@ -33,6 +34,8 @@ void removeChild(procQueue*, procPtr3);
 extern int start3();
 
 /* -------------------------- Globals ------------------------------------- */
+int debug3 = 1;
+
 int sems[MAXSEMS];
 procStruct3 ProcTable3[MAXPROC];
 
@@ -71,7 +74,6 @@ start2(char *arg)
     systemCallVec[SYS_CPUTIME] = cpuTime;
     systemCallVec[SYS_GETPID] = getPID;
 
-
     /*
      * Create first user-level process and wait for it to finish.
      * These are lower-case because they are not system calls;
@@ -100,6 +102,8 @@ start2(char *arg)
      * values back into the sysargs pointer, switch to user-mode, and 
      * return to the user code that called Spawn.
      */
+    if (debug3)
+        USLOSS_Console("Spawning start3...\n");
     pid = spawnReal("start3", start3, NULL, USLOSS_MIN_STACK, 3);
 
     /* Call the waitReal version of your wait code here.
@@ -122,11 +126,17 @@ void spawn(systemArgs *args)
 {
     requireKernelMode("spawn");
 
+    if (debug3)
+        USLOSS_Console("in spawn...\n");
+
     int (*func)(char *) = args->arg1;
     char *arg = args->arg2;
     int stack_size = (int) ((long)args->arg3);
     int priority = (int) ((long)args->arg4);    
     char *name = (char *)(args->arg5);
+
+    if (debug3)
+        USLOSS_Console("spawn: args are: name = %s, stack size = %d, priority = %d\n", name, stack_size, priority);
 
     int pid = spawnReal(name, func, arg, stack_size, priority);
     int status = 0;
@@ -154,20 +164,27 @@ void spawn(systemArgs *args)
 int spawnLaunch(char *startArg) {
     requireKernelMode("spawnLaunch");
 
-    // now the process is running so we can get its pid and set up its stuff
-    procPtr3 proc = &ProcTable3[getpid() % MAXPROC]; 
-    proc->pid = getpid();
-    proc->mboxID = MboxCreate(0, 0); // create proc's 0 slot mailbox
+    if (debug3)
+        USLOSS_Console("in spawnLaunch\n");
 
-    // now block so we can get info from spawnReal
+
+    procPtr3 proc = &ProcTable3[getpid() % MAXPROC]; 
+
+    // if spawnReal hasn't done it yet, set up proc table entry
+    if (proc->pid == -1) 
+        initProc(proc->pid);
+
+    // block until spawnReal is done
     MboxSend(proc->mboxID, 0, 0);
 
     // switch to user mode
     setUserMode();
 
     // call the function to start the process
-    // this should return the result to launch in phase1
-    return proc->startFunc(startArg);
+    proc->startFunc(startArg);
+
+    //terminate(0);
+    return 0;
 }
 
 
@@ -180,19 +197,28 @@ int spawnLaunch(char *startArg) {
 int spawnReal(char *name, int (*func)(char *), char *arg, int stack_size, int priority) 
 {
     requireKernelMode("spawnReal");
-    
+
+    if (debug3)
+        USLOSS_Console("in spawnReal\n");
+
     // fork the process and get its pid
     int pid = fork1(name, spawnLaunch, arg, stack_size, priority);
+
+    if (debug3)
+        USLOSS_Console("spawnReal(): process name = %s, pid = %d\n", name, pid);
 
     // return -1 if fork failed
     if (pid < 0)
         return -1;
 
-    // now we have the pid, we can access the proc table entry created by spawnLaunch
+    // now we have the pid, we can set up the proc table entry
     procPtr3 proc = &ProcTable3[pid % MAXPROC]; 
 
-    // give proc its start function
-    proc->startFunc = func;
+    // if spawnLaunch hasn't done it yet, set up proc table entry
+    if (proc->pid == -1) 
+        initProc(proc->pid);
+    
+    proc->startFunc = func; // give proc its starting function
 
     // unblock the process so spawnLaunch can start it
     MboxReceive(proc->mboxID, 0, 0);
@@ -209,10 +235,12 @@ int spawnReal(char *name, int (*func)(char *), char *arg, int stack_size, int pr
    ------------------------------------------------------------------------ */
 void wait(systemArgs *args)
 {
-	int *pid = args->arg1;
-	int *status = args->arg2;
+    requireKernelMode("wait");
 
-	*pid = waitReal(status);
+	int *status = args->arg2;
+	args->arg1 = (void *) waitReal(status);
+    // switch back to user mode
+    setUserMode();
 }
 
 
@@ -224,6 +252,10 @@ void wait(systemArgs *args)
    ------------------------------------------------------------------------ */
 int waitReal(int *status) 
 {
+    requireKernelMode("waitReal");
+
+    if (debug3)
+        USLOSS_Console("in waitReal\n");
 	int pid = join(status);
 	return pid;
 }
@@ -237,8 +269,12 @@ int waitReal(int *status)
    ------------------------------------------------------------------------ */
 void terminate(systemArgs *args)
 {
+    requireKernelMode("terminate");
+
     int status = (int)((long)args->arg1);
 	terminateReal(status);
+    // switch back to user mode
+    setUserMode();
 }
 
 
@@ -250,13 +286,18 @@ void terminate(systemArgs *args)
    ------------------------------------------------------------------------ */
 void terminateReal(int status) 
 {
+    requireKernelMode("terminateReal");
+
+    if (debug3)
+        USLOSS_Console("in terminateReal, status = %d\n", status);
 
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC];
+    USLOSS_Console("child qeue size = %d\n", proc->childrenQueue.size);
     while (proc->childrenQueue.size > 0) {
+        USLOSS_Console("ndfndjfj\n");
         procPtr3 child = deq(&proc->childrenQueue);
         zap(child->pid);
     }
-    emptyProc(getpid());
     quit(status);
 }
 
@@ -349,12 +390,26 @@ void getPID(systemArgs *args)
 void nullsys3(systemArgs *args)
 {
     USLOSS_Console("nullsys(): Invalid syscall %d. Terminating...\n", args->number);
-    terminateReal(getpid());
+    terminateReal(1);
 } /* nullsys */
 
 
+/* initializes proc struct */
+void initProc(int pid) {
+    requireKernelMode("initProc()"); 
+
+    int i = pid % MAXPROC;
+
+    ProcTable3[i].pid = pid; 
+    ProcTable3[i].mboxID = MboxCreate(0, 0);
+    ProcTable3[i].startFunc = NULL;
+    ProcTable3[i].nextProcPtr = NULL; 
+    initProcQueue(&ProcTable3[i].childrenQueue, CHILDREN);
+}
+
+
+/* empties proc struct */
 void emptyProc(int pid) {
-    // test if in kernel mode; halt if in user mode
     requireKernelMode("emptyProc()"); 
 
     int i = pid % MAXPROC;

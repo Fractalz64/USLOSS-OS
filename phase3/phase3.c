@@ -43,7 +43,7 @@ procPtr3 deqBlockedProc(procPtr3*);
 
 
 /* -------------------------- Globals ------------------------------------- */
-int debug3 = 1;
+int debug3 = 0;
 
 // int sems[MAXSEMS];
 semaphore SemTable[MAXSEMS];
@@ -437,7 +437,6 @@ void semPReal(int handle) {
     // block if value is 0
 	if (SemTable[handle].value == 0) {
 		enq3(&SemTable[handle].blockedProcs, &ProcTable3[getpid()%MAXPROC]);
-
 		MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
 
 		int result = MboxReceive(SemTable[handle].priv_mBoxID, NULL, 0);
@@ -462,6 +461,7 @@ void semPReal(int handle) {
             USLOSS_Console("semP(): bad receive");
         }
     }
+
 
 	MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
 }
@@ -515,7 +515,12 @@ void semVReal(int handle) {
     // unblock blocked proc
 	if (SemTable[handle].blockedProcs.size > 0) {
 		deq3(&SemTable[handle].blockedProcs);
+
+		MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0); // need to receive on mutex so semP can send right after receiving on privmbox
+
 		MboxSend(SemTable[handle].priv_mBoxID, NULL, 0);
+
+		MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
 	}
 	else {
 		SemTable[handle].value += 1 ;

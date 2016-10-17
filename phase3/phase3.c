@@ -14,9 +14,13 @@ void spawn(systemArgs *);
 void wait(systemArgs *);
 void terminate(systemArgs *);
 void semCreate(systemArgs *);
+int semCreateReal(int);
 void semP(systemArgs *);
+void semPReal(int);
 void semV(systemArgs *);
+void semVReal(int);
 void semFree(systemArgs *);
+int semFreeReal(int); 
 void getTimeOfDay(systemArgs *);
 void cpuTime(systemArgs *);
 void getPID(systemArgs *);
@@ -34,11 +38,17 @@ procPtr3 peek3(procQueue*);
 void removeChild3(procQueue*, procPtr3);
 extern int start3();
 
+void enqBlockedProc(procPtr3*, procPtr3);
+procPtr3 deqBlockedProc(procPtr3*);
+
+
 /* -------------------------- Globals ------------------------------------- */
-int debug3 = 1;
+int debug3 = 0;
 
 int sems[MAXSEMS];
 procStruct3 ProcTable3[MAXPROC];
+
+semaphore SemTable[MAXSEMS];
 
 int 
 start2(char *arg)
@@ -74,6 +84,15 @@ start2(char *arg)
     systemCallVec[SYS_GETTIMEOFDAY] = getTimeOfDay;
     systemCallVec[SYS_CPUTIME] = cpuTime;
     systemCallVec[SYS_GETPID] = getPID;
+
+    for (i = 0; i < MAXSEMS; i++) {
+    	SemTable[i].id = -1;
+    	SemTable[i].value = -1;
+    	SemTable[i].startingValue = -1;
+    	SemTable[i].blockedProcPtr = NULL;
+    	SemTable[i].priv_mBoxID = -1;
+    	SemTable[i].mutex_mBoxID = -1;
+    }
 
     /*
      * Create first user-level process and wait for it to finish.
@@ -332,7 +351,52 @@ void terminateReal(int status)
    ------------------------------------------------------------------------ */
 void semCreate(systemArgs *args)
 {
+	int value = (long) args->arg1;
 
+	if (value < 0) {
+		args->arg4 = (void*) (long) -1;
+	}
+	else
+		args->arg4 = 0;
+
+	int handle = semCreateReal(value);
+	args->arg1 = (void*) (long) handle;
+
+	if (isZapped()) {
+		terminateReal(0);
+	}
+	else {
+		setUserMode();
+	}
+}
+
+int semCreateReal(int value) {
+	int i;
+	int priv_mBoxID = MboxCreate(value, 0);
+	int mutex_mBoxID = MboxCreate(1, 0);
+
+	MboxSend(mutex_mBoxID, NULL, 0);
+
+	for (i = 0; i < MAXSEMS; i++) {
+		if (SemTable[i].id == -1) {
+	    	SemTable[i].id = i;
+	    	SemTable[i].value = value;
+	    	SemTable[i].startingValue = value;
+	    	SemTable[i].blockedProcPtr = NULL;
+	    	SemTable[i].priv_mBoxID = priv_mBoxID;
+	    	SemTable[i].mutex_mBoxID = mutex_mBoxID;
+	    	break;
+		}
+	}
+
+	int j;
+	for (j = 0; j < value; j++) {
+		MboxSend(priv_mBoxID, NULL, 0);
+	}
+
+	MboxReceive(mutex_mBoxID, NULL, 0);
+
+	return SemTable[i].id;
 }
 
 
@@ -344,9 +408,65 @@ void semCreate(systemArgs *args)
    ------------------------------------------------------------------------ */
 void semP(systemArgs *args)
 {
+	int handle = (long) args->arg1;
 
+	if (handle < 0) 
+		args->arg4 = (void*) (long) -1;
+	else
+		args->arg4 = 0;
+
+	semPReal(handle);
+
+	if (isZapped()) {
+		terminateReal(0);
+	}
+	else {
+		setUserMode();
+	}
 }
 
+void semPReal(int handle) {
+
+	MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
+
+	if (SemTable[handle].value == 0) {
+		enqBlockedProc(&SemTable[handle].blockedProcPtr, &ProcTable3[getpid()%MAXPROC]);
+
+		MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
+
+		int result = MboxReceive(SemTable[handle].priv_mBoxID, NULL, 0);
+
+		MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
+
+		if (result < 0) {
+			USLOSS_Console("semP(): bad receive");
+		}
+	}
+	else {
+		SemTable[handle].value -= 1 ;
+
+		int result = MboxReceive(SemTable[handle].priv_mBoxID, NULL, 0);
+		if (result < 0) {
+			USLOSS_Console("semP(): bad receive");
+		}
+	}
+
+	MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
+}
+
+void enqBlockedProc(procPtr3* q, procPtr3 proc) {
+	if (*q == NULL) {
+		*q = proc;
+		return;
+	}
+
+	procPtr3 curr = *q;
+	while (curr->nextProcPtr != NULL) {
+		curr = curr->nextProcPtr;
+	}
+	curr->nextProcPtr = proc;
+	proc->nextProcPtr = NULL;
+}
 
 /* ------------------------------------------------------------------------
    Name - semV
@@ -356,9 +476,51 @@ void semP(systemArgs *args)
    ------------------------------------------------------------------------ */
 void semV(systemArgs *args)
 {
+	int handle = (long) args->arg1;
 
+	if (handle < 0) 
+		args->arg4 = (void*) (long) -1;
+	else
+		args->arg4 = 0;
+
+	semVReal(handle);
+
+	if (isZapped()) {
+		terminateReal(0);
+	}
+	else {
+		setUserMode();
+	}
 }
 
+void semVReal(int handle) {
+
+	MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
+
+
+	if (SemTable[handle].blockedProcPtr != NULL) {
+		deqBlockedProc(&SemTable[handle].blockedProcPtr);
+
+		MboxSend(SemTable[handle].priv_mBoxID, NULL, 0);
+
+	}
+	else {
+		SemTable[handle].value += 1 ;
+	}
+
+	MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
+}
+
+
+procPtr3 deqBlockedProc(procPtr3* q) {
+	if (*q == NULL) {
+		return NULL;
+	}
+
+	procPtr3 temp = *q;
+	*q = temp->nextProcPtr;
+	return temp;
+}
 
 /* ------------------------------------------------------------------------
    Name - semFree
@@ -368,6 +530,59 @@ void semV(systemArgs *args)
    ------------------------------------------------------------------------ */
 void semFree(systemArgs *args)
 {
+	int handle = (long) args->arg1;
+
+	if (handle < 0) 
+		args->arg4 = (void*) (long) -1;
+	else
+		args->arg4 = 0;
+
+	int value = semFreeReal(handle);
+
+	args->arg4 = (void*) (long) value;
+
+	if (isZapped()) {
+		terminateReal(0);
+	}
+	else {
+		setUserMode();
+	}
+}
+
+int semFreeReal(int handle) {
+	int mutexID = SemTable[handle].mutex_mBoxID;
+	MboxSend(mutexID, NULL, 0);
+
+	int privID = SemTable[handle].priv_mBoxID;
+	procPtr3 blockedProc = SemTable[handle].blockedProcPtr;
+
+	SemTable[handle].id = -1;
+	SemTable[handle].value = -1;
+	SemTable[handle].startingValue = -1;
+	SemTable[handle].blockedProcPtr = NULL;
+	SemTable[handle].priv_mBoxID = -1;
+	SemTable[handle].mutex_mBoxID = -1;
+
+	if (blockedProc != NULL) {
+		while (blockedProc != NULL) {
+			deqBlockedProc(&blockedProc);
+			procPtr3 nextProc = blockedProc->nextProcPtr;
+
+
+			int result = MboxSend(privID, NULL, 0);
+			if (result < 0) {
+				USLOSS_Console("semFreeReal(): send error");
+			}
+			blockedProc = nextProc;
+		}
+		MboxReceive(mutexID, NULL, 0);
+		return 1;
+	}
+	else {
+		MboxReceive(mutexID, NULL, 0);
+		return 0;
+	}
+
 
 }
 

@@ -4,10 +4,8 @@ typedef struct procStruct3 procStruct3;
 typedef struct procStruct3 * procPtr3;
 typedef struct procQueue procQueue;
 
-#define READYLIST 0
+#define BLOCKED 0
 #define CHILDREN 1
-#define DEADCHILDREN 2
-#define ZAP 3
 
 struct procQueue {
 	procPtr3 head;
@@ -37,7 +35,7 @@ struct semaphore {
  	int 		id;
  	int 		value;
  	int 		startingValue;
- 	procPtr3    blockedProcPtr;
+ 	procQueue   blockedProcs;
  	int 		priv_mBoxID;
  	int 		mutex_mBoxID;
  };

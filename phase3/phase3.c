@@ -43,12 +43,12 @@ procPtr3 deqBlockedProc(procPtr3*);
 
 
 /* -------------------------- Globals ------------------------------------- */
-int debug3 = 0;
+int debug3 = 1;
 
-int sems[MAXSEMS];
-procStruct3 ProcTable3[MAXPROC];
-
+// int sems[MAXSEMS];
 semaphore SemTable[MAXSEMS];
+int numSems;
+procStruct3 ProcTable3[MAXPROC];
 
 int 
 start2(char *arg)
@@ -64,13 +64,8 @@ start2(char *arg)
      * Data structure initialization as needed...
      */
 
-    int i;
-    // populate proc table
-    for (i = 0; i < MAXPROC; i++) {
-        emptyProc3(i);
-    }
-
     // populate system call vec
+    int i;
     for (i = 0; i < USLOSS_MAX_SYSCALLS; i++) {
         systemCallVec[i] = nullsys3;
     }
@@ -85,14 +80,21 @@ start2(char *arg)
     systemCallVec[SYS_CPUTIME] = cpuTime;
     systemCallVec[SYS_GETPID] = getPID;
 
+    // populate proc table
+    for (i = 0; i < MAXPROC; i++) {
+        emptyProc3(i);
+    }
+
+    // populate semaphore table
     for (i = 0; i < MAXSEMS; i++) {
     	SemTable[i].id = -1;
     	SemTable[i].value = -1;
     	SemTable[i].startingValue = -1;
-    	SemTable[i].blockedProcPtr = NULL;
     	SemTable[i].priv_mBoxID = -1;
     	SemTable[i].mutex_mBoxID = -1;
     }
+
+    numSems = 0;
 
     /*
      * Create first user-level process and wait for it to finish.
@@ -143,8 +145,8 @@ start2(char *arg)
 /* ------------------------------------------------------------------------
    Name - spawn
    Purpose - Extracts arguments and checks for correctness.
-   Parameters - systemArgs containing arguments.
-   Returns - nothing, but it changes the systemArgs
+   Parameters - systemArgs containing parameters for fork1
+   Returns - arg1: pid of forked process, arg4: success (0) or failure (-1)
    ----------------------------------------------------------------------- */
 void spawn(systemArgs *args) 
 {
@@ -162,6 +164,9 @@ void spawn(systemArgs *args)
     int pid = spawnReal(name, func, arg, stack_size, priority);
     int status = 0;
 
+    if (debug3)
+        USLOSS_Console("spawn(): spawnd pid %d\n", pid);
+
     // terminate self if zapped
     if (isZapped())
         terminateReal(1); 
@@ -174,19 +179,59 @@ void spawn(systemArgs *args)
     args->arg4 = (void *) ((long)status);
 } 
 
+int spawnReal(char *name, int (*func)(char *), char *arg, int stack_size, int priority) 
+{
+    requireKernelMode("spawnReal");
+
+    if (debug3)
+        USLOSS_Console("spawnReal(): forking process %s... \n", name);
+
+    // fork the process and get its pid
+    int pid = fork1(name, spawnLaunch, arg, stack_size, priority);
+
+    if (debug3)
+        USLOSS_Console("spawnReal(): forked process name = %s, pid = %d\n", name, pid);
+
+    // return -1 if fork failed
+    if (pid < 0)
+        return -1;
+
+    // now we have the pid, we can get the child table entry
+    procPtr3 child = &ProcTable3[pid % MAXPROC]; 
+    enq3(&ProcTable3[getpid() % MAXPROC].childrenQueue, child); // add to children queue
+
+    // if spawnLaunch hasn't done it yet, set up proc table entry
+    if (child->pid < 0) {
+        if (debug3)
+            USLOSS_Console("spawnReal(): initializing proc table entry for pid %d\n", pid);
+        initProc(pid);
+    }
+    
+    child->startFunc = func; // give proc its starting function
+    child->parentPtr = &ProcTable3[getpid() % MAXPROC]; // set child's parent pointer
+
+    // unblock the process so spawnLaunch can start it
+    MboxCondSend(child->mboxID, 0, 0);
+
+    return pid;
+} 
+
 
 /* ------------------------------------------------------------------------
    Name - spawnLaunch
-   Purpose - sets up process table entry for new process and starts
-                running it in user mode
-   Parameters - 
-   Returns - 
+   Purpose - launches user mode processes and terminates it
+   Parameters - not used
+   Returns - 0
    ----------------------------------------------------------------------- */
 int spawnLaunch(char *startArg) {
     requireKernelMode("spawnLaunch");
 
     if (debug3)
         USLOSS_Console("spawnLaunch(): launched pid = %d\n", getpid());
+
+    // terminate self if zapped
+    if (isZapped())
+        terminateReal(1); 
 
     // get the proc info
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC]; 
@@ -196,10 +241,10 @@ int spawnLaunch(char *startArg) {
         if (debug3)
             USLOSS_Console("spawnLaunch(): initializing proc table entry for pid %d\n", getpid());
         initProc(getpid());
-    }
 
-    // block until spawnReal is done
-    MboxSend(proc->mboxID, 0, 0);
+        // block until spawnReal is done
+        MboxReceive(proc->mboxID, 0, 0);
+    }
 
     // switch to user mode
     setUserMode();
@@ -219,52 +264,10 @@ int spawnLaunch(char *startArg) {
 
 
 /* ------------------------------------------------------------------------
-   Name - spawnReal
-   Purpose - forks a process running spawnLaunch
-   Parameters - same as fork1
-   Returns - pid
-   ----------------------------------------------------------------------- */
-int spawnReal(char *name, int (*func)(char *), char *arg, int stack_size, int priority) 
-{
-    requireKernelMode("spawnReal");
-
-    if (debug3)
-        USLOSS_Console("spawnReal(): forking process %s... \n", name);
-
-    // fork the process and get its pid
-    int pid = fork1(name, spawnLaunch, arg, stack_size, priority);
-
-    if (debug3)
-        USLOSS_Console("spawnReal(): forked process name = %s, pid = %d\n", name, pid);
-
-    // return -1 if fork failed
-    if (pid < 0)
-        return -1;
-
-    // now we have the pid, we can get the proc table entry
-    procPtr3 proc = &ProcTable3[pid % MAXPROC]; 
-
-    // if spawnLaunch hasn't done it yet, set up proc table entry
-    if (proc->pid < 0) {
-        if (debug3)
-            USLOSS_Console("spawnReal(): initializing proc table entry for pid %d\n", pid);
-        initProc(pid);
-    }
-    
-    proc->startFunc = func; // give proc its starting function
-
-    // unblock the process so spawnLaunch can start it
-    MboxReceive(proc->mboxID, 0, 0);
-
-    return pid;
-} 
-
-
-/* ------------------------------------------------------------------------
    Name - wait
    Purpose - waits for a child process to terminate
-   Parameters - systemArgs containing arguments
-   Returns - nothing
+   Parameters - arg1: pointer for pid, arg2: pointer for status
+   Returns - arg1: pid, arg2: status, arg4: success (0) or failure (-1)
    ------------------------------------------------------------------------ */
 void wait(systemArgs *args)
 {
@@ -277,22 +280,18 @@ void wait(systemArgs *args)
         USLOSS_Console("wait(): joined with child pid = %d, status = %d\n", pid, *status);
     }
 
-    //args->arg1 = (void *) ((long)waitReal(status));
     args->arg1 = (void *) ((long) pid);
     args->arg2 = (void *) ((long) *status);
     args->arg4 = (void *) ((long) 0);
+
+    // terminate self if zapped
+    if (isZapped())
+        terminateReal(1); 
 
     // switch back to user mode
     setUserMode();
 }
 
-
-/* ------------------------------------------------------------------------
-   Name - waitReal
-   Purpose - calls join and returns pid of joined child
-   Parameters - pointer to child's exit status to give to join
-   Returns - pid of joined child
-   ------------------------------------------------------------------------ */
 int waitReal(int *status) 
 {
     requireKernelMode("waitReal");
@@ -307,7 +306,7 @@ int waitReal(int *status)
 /* ------------------------------------------------------------------------
    Name - terminate
    Purpose - terminates the invoking process and all of its children
-   Parameters - termination code
+   Parameters - arg1: termination code
    Returns - nothing
    ------------------------------------------------------------------------ */
 void terminate(systemArgs *args)
@@ -320,13 +319,6 @@ void terminate(systemArgs *args)
     setUserMode();
 }
 
-
-/* ------------------------------------------------------------------------
-   Name - terminateReal
-   Purpose - terminates the invoking process and all of its children
-   Parameters - termination code
-   Returns - nothing
-   ------------------------------------------------------------------------ */
 void terminateReal(int status) 
 {
     requireKernelMode("terminateReal");
@@ -334,33 +326,40 @@ void terminateReal(int status)
     if (debug3)
         USLOSS_Console("terminateReal(): terminating pid %d, status = %d\n", getpid(), status);
 
+    // zap all children
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC];
     while (proc->childrenQueue.size > 0) {
         procPtr3 child = deq3(&proc->childrenQueue);
         zap(child->pid);
     }
+    // remove self from parent's list of children
+    removeChild3(&(proc->parentPtr->childrenQueue), proc);
     quit(status);
 }
 
 
 /* ------------------------------------------------------------------------
    Name - semCreate
-   Purpose - 
+   Purpose - create a new semaphore
    Parameters - systemArgs containing arguments
-   Returns - nothing
+   Returns - arg1: semaphore handle, arg4: success (0) or failure (-1)
    ------------------------------------------------------------------------ */
 void semCreate(systemArgs *args)
 {
+    requireKernelMode("semCreate");
+
 	int value = (long) args->arg1;
 
-	if (value < 0) {
+    // fails if value is negative or no sems avaliable
+	if (value < 0 || numSems == MAXSEMS) {
 		args->arg4 = (void*) (long) -1;
 	}
-	else
-		args->arg4 = 0;
-
-	int handle = semCreateReal(value);
-	args->arg1 = (void*) (long) handle;
+    else {
+        numSems++;
+        int handle = semCreateReal(value);
+        args->arg1 = (void*) (long) handle;
+        args->arg4 = 0;
+    }
 
 	if (isZapped()) {
 		terminateReal(0);
@@ -371,6 +370,8 @@ void semCreate(systemArgs *args)
 }
 
 int semCreateReal(int value) {
+    requireKernelMode("semCreateReal");
+
 	int i;
 	int priv_mBoxID = MboxCreate(value, 0);
 	int mutex_mBoxID = MboxCreate(1, 0);
@@ -382,9 +383,9 @@ int semCreateReal(int value) {
 	    	SemTable[i].id = i;
 	    	SemTable[i].value = value;
 	    	SemTable[i].startingValue = value;
-	    	SemTable[i].blockedProcPtr = NULL;
 	    	SemTable[i].priv_mBoxID = priv_mBoxID;
 	    	SemTable[i].mutex_mBoxID = mutex_mBoxID;
+            initProcQueue3(&SemTable[i].blockedProcs, BLOCKED);
 	    	break;
 		}
 	}
@@ -408,14 +409,16 @@ int semCreateReal(int value) {
    ------------------------------------------------------------------------ */
 void semP(systemArgs *args)
 {
+    requireKernelMode("semP");
+
 	int handle = (long) args->arg1;
 
 	if (handle < 0) 
 		args->arg4 = (void*) (long) -1;
-	else
+	else {
 		args->arg4 = 0;
-
-	semPReal(handle);
+        semPReal(handle);
+    }
 
 	if (isZapped()) {
 		terminateReal(0);
@@ -426,47 +429,56 @@ void semP(systemArgs *args)
 }
 
 void semPReal(int handle) {
+    requireKernelMode("semPReal");
 
+    // get mutex on this semaphore
 	MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
 
+    // block if value is 0
 	if (SemTable[handle].value == 0) {
-		enqBlockedProc(&SemTable[handle].blockedProcPtr, &ProcTable3[getpid()%MAXPROC]);
+		enq3(&SemTable[handle].blockedProcs, &ProcTable3[getpid()%MAXPROC]);
 
 		MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
 
 		int result = MboxReceive(SemTable[handle].priv_mBoxID, NULL, 0);
 
+        // terminate if the semaphore freed while we were blocked
+        if (SemTable[handle].id < 0)
+            terminateReal(1);
+
+        // get mutex again when we unblock
 		MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
 
 		if (result < 0) {
 			USLOSS_Console("semP(): bad receive");
 		}
 	}
-	else {
-		SemTable[handle].value -= 1 ;
 
-		int result = MboxReceive(SemTable[handle].priv_mBoxID, NULL, 0);
-		if (result < 0) {
-			USLOSS_Console("semP(): bad receive");
-		}
-	}
+    else {
+        SemTable[handle].value -= 1 ;
+
+        int result = MboxReceive(SemTable[handle].priv_mBoxID, NULL, 0);
+        if (result < 0) {
+            USLOSS_Console("semP(): bad receive");
+        }
+    }
 
 	MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
 }
 
-void enqBlockedProc(procPtr3* q, procPtr3 proc) {
-	if (*q == NULL) {
-		*q = proc;
-		return;
-	}
+// void enqBlockedProc(procPtr3* q, procPtr3 proc) {
+// 	if (*q == NULL) {
+// 		*q = proc;
+// 		return;
+// 	}
 
-	procPtr3 curr = *q;
-	while (curr->nextProcPtr != NULL) {
-		curr = curr->nextProcPtr;
-	}
-	curr->nextProcPtr = proc;
-	proc->nextProcPtr = NULL;
-}
+// 	procPtr3 curr = *q;
+// 	while (curr->nextProcPtr != NULL) {
+// 		curr = curr->nextProcPtr;
+// 	}
+// 	curr->nextProcPtr = proc;
+// 	proc->nextProcPtr = NULL;
+// }
 
 /* ------------------------------------------------------------------------
    Name - semV
@@ -476,6 +488,8 @@ void enqBlockedProc(procPtr3* q, procPtr3 proc) {
    ------------------------------------------------------------------------ */
 void semV(systemArgs *args)
 {
+    requireKernelMode("semV");
+
 	int handle = (long) args->arg1;
 
 	if (handle < 0) 
@@ -494,15 +508,14 @@ void semV(systemArgs *args)
 }
 
 void semVReal(int handle) {
+    requireKernelMode("semVReal");
 
 	MboxSend(SemTable[handle].mutex_mBoxID, NULL, 0);
 
-
-	if (SemTable[handle].blockedProcPtr != NULL) {
-		deqBlockedProc(&SemTable[handle].blockedProcPtr);
-
+    // unblock blocked proc
+	if (SemTable[handle].blockedProcs.size > 0) {
+		deq3(&SemTable[handle].blockedProcs);
 		MboxSend(SemTable[handle].priv_mBoxID, NULL, 0);
-
 	}
 	else {
 		SemTable[handle].value += 1 ;
@@ -512,15 +525,15 @@ void semVReal(int handle) {
 }
 
 
-procPtr3 deqBlockedProc(procPtr3* q) {
-	if (*q == NULL) {
-		return NULL;
-	}
+// procPtr3 deqBlockedProc(procPtr3* q) {
+// 	if (*q == NULL) {
+// 		return NULL;
+// 	}
 
-	procPtr3 temp = *q;
-	*q = temp->nextProcPtr;
-	return temp;
-}
+// 	procPtr3 temp = *q;
+// 	*q = temp->nextProcPtr;
+// 	return temp;
+// }
 
 /* ------------------------------------------------------------------------
    Name - semFree
@@ -530,16 +543,17 @@ procPtr3 deqBlockedProc(procPtr3* q) {
    ------------------------------------------------------------------------ */
 void semFree(systemArgs *args)
 {
+    requireKernelMode("semFree");
+
 	int handle = (long) args->arg1;
 
 	if (handle < 0) 
 		args->arg4 = (void*) (long) -1;
-	else
-		args->arg4 = 0;
-
-	int value = semFreeReal(handle);
-
-	args->arg4 = (void*) (long) value;
+	else {
+        args->arg4 = 0;
+        int value = semFreeReal(handle);
+        args->arg4 = (void*) (long) value;
+    }
 
 	if (isZapped()) {
 		terminateReal(0);
@@ -550,40 +564,37 @@ void semFree(systemArgs *args)
 }
 
 int semFreeReal(int handle) {
+    requireKernelMode("semFreeReal");
+
 	int mutexID = SemTable[handle].mutex_mBoxID;
 	MboxSend(mutexID, NULL, 0);
 
 	int privID = SemTable[handle].priv_mBoxID;
-	procPtr3 blockedProc = SemTable[handle].blockedProcPtr;
 
-	SemTable[handle].id = -1;
-	SemTable[handle].value = -1;
-	SemTable[handle].startingValue = -1;
-	SemTable[handle].blockedProcPtr = NULL;
-	SemTable[handle].priv_mBoxID = -1;
-	SemTable[handle].mutex_mBoxID = -1;
+    SemTable[handle].id = -1;
+    SemTable[handle].value = -1;
+    SemTable[handle].startingValue = -1;
+    SemTable[handle].priv_mBoxID = -1;
+    SemTable[handle].mutex_mBoxID = -1;
+    numSems--;
 
-	if (blockedProc != NULL) {
-		while (blockedProc != NULL) {
-			deqBlockedProc(&blockedProc);
-			procPtr3 nextProc = blockedProc->nextProcPtr;
+    // terminate procs waiting on this semphore
+    if (SemTable[handle].blockedProcs.size > 0) {
+        while (SemTable[handle].blockedProcs.size > 0) {
+            deq3(&SemTable[handle].blockedProcs);
+            int result = MboxSend(privID, NULL, 0);
+            if (result < 0) {
+                USLOSS_Console("semFreeReal(): send error");
+            }
+        }
+        MboxReceive(mutexID, NULL, 0);
+        return 1;
+    }
 
-
-			int result = MboxSend(privID, NULL, 0);
-			if (result < 0) {
-				USLOSS_Console("semFreeReal(): send error");
-			}
-			blockedProc = nextProc;
-		}
-		MboxReceive(mutexID, NULL, 0);
-		return 1;
-	}
 	else {
 		MboxReceive(mutexID, NULL, 0);
 		return 0;
 	}
-
-
 }
 
 
@@ -595,7 +606,8 @@ int semFreeReal(int handle) {
    ------------------------------------------------------------------------ */
 void getTimeOfDay(systemArgs *args)
 {
-
+    requireKernelMode("getTimeOfDay");
+    *((int *)(args->arg1)) = USLOSS_Clock();
 }
 
 
@@ -607,7 +619,8 @@ void getTimeOfDay(systemArgs *args)
    ------------------------------------------------------------------------ */
 void cpuTime(systemArgs *args)
 {
-
+    requireKernelMode("cpuTime");
+    *((int *)(args->arg1)) = readtime();
 }
 
 
@@ -619,7 +632,8 @@ void cpuTime(systemArgs *args)
    ------------------------------------------------------------------------ */
 void getPID(systemArgs *args)
 {
-
+    requireKernelMode("getPID");
+    *((int *)(args->arg1)) = getpid();
 }
 
 
@@ -628,7 +642,7 @@ void nullsys3(systemArgs *args)
 {
     USLOSS_Console("nullsys(): Invalid syscall %d. Terminating...\n", args->number);
     terminateReal(1);
-} /* nullsys */
+}
 
 
 /* initializes proc struct */
@@ -705,7 +719,7 @@ void enq3(procQueue* q, procPtr3 p) {
   if (q->head == NULL && q->tail == NULL) {
     q->head = q->tail = p;
   } else {
-    if (q->type == READYLIST)
+    if (q->type == BLOCKED)
       q->tail->nextProcPtr = p;
     else if (q->type == CHILDREN)
       q->tail->nextSiblingPtr = p;
@@ -724,7 +738,7 @@ procPtr3 deq3(procQueue* q) {
     q->head = q->tail = NULL; 
   }
   else {
-    if (q->type == READYLIST)
+    if (q->type == BLOCKED)
       q->head = q->head->nextProcPtr;  
     else if (q->type == CHILDREN)
       q->head = q->head->nextSiblingPtr;  

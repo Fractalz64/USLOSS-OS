@@ -45,7 +45,6 @@ procPtr3 deqBlockedProc(procPtr3*);
 /* -------------------------- Globals ------------------------------------- */
 int debug3 = 0;
 
-// int sems[MAXSEMS];
 semaphore SemTable[MAXSEMS];
 int numSems;
 procStruct3 ProcTable3[MAXPROC];
@@ -229,10 +228,6 @@ int spawnLaunch(char *startArg) {
     if (debug3)
         USLOSS_Console("spawnLaunch(): launched pid = %d\n", getpid());
 
-    // terminate self if zapped
-    if (isZapped())
-        terminateReal(1); 
-
     // get the proc info
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC]; 
 
@@ -245,6 +240,10 @@ int spawnLaunch(char *startArg) {
         // block until spawnReal is done
         MboxReceive(proc->mboxID, 0, 0);
     }
+
+    // terminate self if zapped 
+    if (isZapped())
+        terminateReal(1); 
 
     // switch to user mode
     setUserMode();
@@ -274,13 +273,14 @@ void wait(systemArgs *args)
     requireKernelMode("wait");
 
 	int *status = args->arg2;
-    int pid = waitReal(status);
+    int *pid = args->arg1;
+    *pid = waitReal(status);
 
     if (debug3) {
-        USLOSS_Console("wait(): joined with child pid = %d, status = %d\n", pid, *status);
+        USLOSS_Console("wait(): joined with child pid = %d, status = %d\n", *pid, *status);
     }
 
-    args->arg1 = (void *) ((long) pid);
+    args->arg1 = (void *) ((long) *pid);
     args->arg2 = (void *) ((long) *status);
     args->arg4 = (void *) ((long) 0);
 
@@ -326,14 +326,15 @@ void terminateReal(int status)
     if (debug3)
         USLOSS_Console("terminateReal(): terminating pid %d, status = %d\n", getpid(), status);
 
-    // zap all children
     procPtr3 proc = &ProcTable3[getpid() % MAXPROC];
     while (proc->childrenQueue.size > 0) {
-        procPtr3 child = deq3(&proc->childrenQueue);
+        procPtr3 child = peek3(&proc->childrenQueue);
         zap(child->pid);
     }
+
     // remove self from parent's list of children
     removeChild3(&(proc->parentPtr->childrenQueue), proc);
+    emptyProc3(proc->pid); 
     quit(status);
 }
 
@@ -466,19 +467,6 @@ void semPReal(int handle) {
 	MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
 }
 
-// void enqBlockedProc(procPtr3* q, procPtr3 proc) {
-// 	if (*q == NULL) {
-// 		*q = proc;
-// 		return;
-// 	}
-
-// 	procPtr3 curr = *q;
-// 	while (curr->nextProcPtr != NULL) {
-// 		curr = curr->nextProcPtr;
-// 	}
-// 	curr->nextProcPtr = proc;
-// 	proc->nextProcPtr = NULL;
-// }
 
 /* ------------------------------------------------------------------------
    Name - semV
@@ -529,16 +517,6 @@ void semVReal(int handle) {
 	MboxReceive(SemTable[handle].mutex_mBoxID, NULL, 0);
 }
 
-
-// procPtr3 deqBlockedProc(procPtr3* q) {
-// 	if (*q == NULL) {
-// 		return NULL;
-// 	}
-
-// 	procPtr3 temp = *q;
-// 	*q = temp->nextProcPtr;
-// 	return temp;
-// }
 
 /* ------------------------------------------------------------------------
    Name - semFree

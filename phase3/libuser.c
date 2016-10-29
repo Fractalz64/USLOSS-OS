@@ -74,7 +74,6 @@ int Wait(int *pid, int *status)
     
     CHECKMODE;
     sysArg.number = SYS_WAIT;
-    sysArg.arg1 = pid;
     sysArg.arg2 = status;
 
     USLOSS_Syscall(&sysArg);

@@ -32,46 +32,4 @@ extern  int  start4(char *);
 #define ERR_INVALID             -1
 #define ERR_OK                  0
 
-/* Queue struct for processes */
-typedef struct procStruct procStruct;
-typedef struct procStruct * procPtr;
-typedef struct procQueue procQueue;
-
-#define BLOCKED 0
-#define CHILDREN 1
-#define SLEEP 2
-
-struct procQueue {
-	procPtr head;
-	procPtr tail;
-	int 	 size;
-	int 	 type; /* which procPtr to use for next */
-};
-
-/* 
-* Process struct for phase 4
-*/
-struct procStruct {
-    int             pid;
-    int 		    mboxID; /* 0 slot mailbox belonging to this process */
-	int (* startFunc) (char *);   /* function where process begins */
-    procPtr     nextProcPtr;
-    procPtr     nextSiblingPtr;
-    procPtr     parentPtr;
-	procQueue 	childrenQueue;
-
-	int			wakeTime;
-	procPtr		nextSleepPtr;
-};
-
-typedef struct semaphore semaphore;
-struct semaphore {
- 	int 		id;
- 	int 		value;
- 	int 		startingValue;
- 	procQueue   blockedProcs;
- 	int 		priv_mBoxID;
- 	int 		mutex_mBoxID;
- };
-
 #endif /* _PHASE4_H */

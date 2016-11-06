@@ -3,7 +3,7 @@ TARGET = libphase4.a
 ASSIGNMENT = 452phase4
 CC = gcc
 AR = ar
-COBJS = phase4.o libuser.o p1.o
+COBJS = phase4.o libuser4.o p1.o
 CSRCS = ${COBJS:.o=.c}
 
 PHASE1LIB = patrickphase1

@@ -8,7 +8,7 @@
 
 #include <phase1.h>
 #include <phase2.h>
-#include <libuser.h>
+#include <libuser4.h>
 #include <usyscall.h>
 #include <usloss.h>
 

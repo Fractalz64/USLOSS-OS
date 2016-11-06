@@ -273,7 +273,7 @@ void emptyProc(int pid) {
 
     ProcTable[i].pid = -1; 
     ProcTable[i].mboxID = -1;
-    ProcTable[i].nextSleepPtr = NULL;
+    //ProcTable[i].nextSleepPtr = NULL;
     ProcTable[i].wakeTime = -1;
 }
 

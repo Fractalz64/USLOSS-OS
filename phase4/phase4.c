@@ -11,6 +11,7 @@
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
+int debug4 = 0;
 int 	running;
 
 static int ClockDriver(char *);
@@ -97,14 +98,14 @@ start3(void)
      * the stack size depending on the complexity of your
      * driver, and perhaps do something with the pid returned.
      */
-    for (i = 0; i < USLOSS_DISK_UNITS; i++) {
-        sprintf(diskbuf, "%d", i);
-        pid = fork1(name, DiskDriver, diskbuf, USLOSS_MIN_STACK, 2);
-        if (pid < 0) {
-            USLOSS_Console("start3(): Can't create term driver %d\n", i);
-            USLOSS_Halt(1);
-        }
-    }
+    // for (i = 0; i < USLOSS_DISK_UNITS; i++) {
+    //     sprintf(diskbuf, "%d", i);
+    //     pid = fork1("Disk driver", DiskDriver, diskbuf, USLOSS_MIN_STACK, 2);
+    //     if (pid < 0) {
+    //         USLOSS_Console("start3(): Can't create disk driver %d\n", i);
+    //         USLOSS_Halt(1);
+    //     }
+    // }
 
     // May be other stuff to do here before going on to terminal drivers
 
@@ -142,6 +143,8 @@ ClockDriver(char *arg)
     // Let the parent know we are running and enable interrupts.
     semvReal(running);
     USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
+    if (debug4) 
+        USLOSS_Console("ClockDriver: running\n");
 
     // Infinite loop until we are zap'd
     while(! isZapped()) {
@@ -152,8 +155,10 @@ ClockDriver(char *arg)
 
 	    // Compute the current time and wake up any processes whose time has come.
         procPtr proc;
-        while (heapPeek(&sleepHeap)->wakeTime >= USLOSS_Clock()) {
+        while (sleepHeap.size > 0 && USLOSS_Clock() >= heapPeek(&sleepHeap)->wakeTime) {
             proc = heapRemove(&sleepHeap);
+            if (debug4) 
+                USLOSS_Console("ClockDriver: Waking up process %d\n", proc->pid);
             semvReal(proc->blockSem); 
         }
     }
@@ -187,6 +192,7 @@ TermWriter(char * arg)
 
 // sleep function value extraction
 void sleep(systemArgs * args) {
+    requireKernelMode("sleep");
     int seconds = (long) args->arg1;
     int retval = sleepReal(seconds);
     args->arg4 = (void *) ((long) retval);
@@ -195,14 +201,24 @@ void sleep(systemArgs * args) {
 
 // real sleep function
 int sleepReal(int seconds) {
+    requireKernelMode("sleepReal");
     if (seconds < 0) {
         return -1;
     }
 
+    // init/get the process
+    if (ProcTable[getpid() % MAXPROC].pid == -1) 
+        initProc(getpid());
     procPtr proc = &ProcTable[getpid() % MAXPROC];
-    proc->wakeTime = USLOSS_Clock() + seconds*1000;
+
+    // set wake time
+    proc->wakeTime = USLOSS_Clock() + seconds*1000000;
     heapAdd(&sleepHeap, proc); // add to sleep heap
+    if (debug4) 
+        USLOSS_Console("sleepReal: Process %d going to sleep until %d\n", proc->pid, proc->wakeTime);
     sempReal(proc->blockSem); // block the process
+    if (debug4) 
+        USLOSS_Console("sleepReal: Process %d woke up, time is %d\n", proc->pid, USLOSS_Clock());
     return 0;
 }
 
@@ -262,7 +278,8 @@ void initProc(int pid) {
 
     ProcTable[i].pid = pid; 
     ProcTable[i].mboxID = MboxCreate(0, 0);
-    ProcTable[i].blockSem = 0;
+    ProcTable[i].blockSem = semcreateReal(0);
+    ProcTable[i].wakeTime = -1;
 }
 
 /* empties proc struct */
@@ -273,7 +290,8 @@ void emptyProc(int pid) {
 
     ProcTable[i].pid = -1; 
     ProcTable[i].mboxID = -1;
-    //ProcTable[i].nextSleepPtr = NULL;
+    ProcTable[i].mboxID = -1;
+    ProcTable[i].blockSem = -1;
     ProcTable[i].wakeTime = -1;
 }
 
@@ -374,20 +392,22 @@ void emptyProc(int pid) {
 
 /* Setup heap */
 void initHeap(heap* h) {
-  h->size = 0;
+    h->size = 0;
 }
 
 /* Add to heap */
 void heapAdd(heap * h, procPtr p) {
-  // add to bottom, then move up until it is in place
-  int i = h->size;
-  h->procs[h->size++] = p;
-  while (h->procs[i/2]->wakeTime > p->wakeTime) {
-    // move parent down
-    h->procs[i] = h->procs[i/2];
-    i /= 2;
-  }
-  h->procs[i] = p; // put at final location
+    // add to bottom, then move up until it is in place
+    int i = h->size;
+    h->procs[h->size++] = p;
+    while (h->procs[i/2]->wakeTime > p->wakeTime) {
+        // move parent down
+        h->procs[i] = h->procs[i/2];
+        i /= 2;
+    }
+    h->procs[i] = p; // put at final location
+    if (debug4) 
+        USLOSS_Console("heapAdd: Added proc %d to heap at index %d, size = %d\n", p->pid, i, h->size);
 }
 
 /* Return min process on heap */
@@ -400,32 +420,34 @@ procPtr heapRemove(heap * h) {
   if (h->size == 0)
     return NULL;
 
-  procPtr removed = h->procs[0]; // remove min
-  h->size--;
-  h->procs[0] = h->procs[h->size]; // put last in first spot
+    procPtr removed = h->procs[0]; // remove min
+    h->size--;
+    h->procs[0] = h->procs[h->size]; // put last in first spot
 
-  // re-heapify
-  int i = 0, left, right, min = 0;
-  while (i*2 <= h->size) {
-    // get locations of children
-    left = i*2 + 1;
-    right = i*2 + 2;
+    // re-heapify
+    int i = 0, left, right, min = 0;
+    while (i*2 <= h->size) {
+        // get locations of children
+        left = i*2 + 1;
+        right = i*2 + 2;
 
-    // get min child
-    if (left <= h->size && h->procs[left]->wakeTime < h->procs[min]->wakeTime) 
-      min = left;
-    else if (right <= h->size && h->procs[right]->wakeTime < h->procs[min]->wakeTime) 
-      min = right;
+        // get min child
+        if (left <= h->size && h->procs[left]->wakeTime < h->procs[min]->wakeTime) 
+            min = left;
+        if (right <= h->size && h->procs[right]->wakeTime < h->procs[min]->wakeTime) 
+            min = right;
 
-    // swap current with min child if needed
-    if (min != i) {
-      procPtr temp = h->procs[i];
-      h->procs[i] = h->procs[min];
-      h->procs[min] = temp;
-      i = min;
+        // swap current with min child if needed
+        if (min != i) {
+            procPtr temp = h->procs[i];
+            h->procs[i] = h->procs[min];
+            h->procs[min] = temp;
+            i = min;
+        }
+        else
+            break; // otherwise we're done
     }
-    else
-      break; // otherwise we're done
-  }
-  return removed;
+    if (debug4) 
+        USLOSS_Console("heapRemove: Called, returning pid %d, size = %d\n", removed->pid, h->size);
+    return removed;
 }

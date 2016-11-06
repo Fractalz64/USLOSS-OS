@@ -4,8 +4,10 @@
 #include <phase3.h>
 #include <phase4.h>
 #include <providedPrototypes.h>
+#include <p4structs.h>
 #include <usyscall.h>
 #include <stdlib.h> /* needed for atoi() */
+#include <stdio.h>
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
@@ -22,9 +24,23 @@ void diskWrite(systemArgs *);
 void diskSize(systemArgs *);
 void termRead(systemArgs *);
 void termWrite(systemArgs *);
+int sleepReal(int);
+void requireKernelMode(char *);
+void emptyProc(int);
+void initProc(int);
+void setUserMode();
+// void initProcQueue(procQueue*, int);
+// void enq(procQueue*, procPtr);
+// procPtr deq(procQueue*);
+// procPtr peek(procQueue*);
+// void removeChild3(procQueue*, procPtr);
+void initHeap(heap *);
+void heapAdd(heap *, procPtr);
+procPtr heapPeek(heap *);
+procPtr heapRemove(heap *);
 
 procStruct ProcTable[MAXPROC];
-procQueue sleepQ;
+heap sleepHeap;
 
 void
 start3(void)
@@ -48,7 +64,7 @@ start3(void)
     }
 
     // sleep queue
-    initProcQueue(&sleepQ, SLEEP);
+    initHeap(&sleepHeap);
 
     // initialize systemCallVec
     systemCallVec[SYS_SLEEP] = sleep;
@@ -129,20 +145,25 @@ ClockDriver(char *arg)
 
     // Infinite loop until we are zap'd
     while(! isZapped()) {
-	result = waitdevice(USLOSS_CLOCK_DEV, 0, &status);
-	if (result != 0) {
-	    return 0;
-	}
-	/*
-	 * Compute the current time and wake up any processes
-	 * whose time has come.
-	 */
+	    result = waitDevice(USLOSS_CLOCK_DEV, 0, &status);
+	    if (result != 0) {
+	        return 0;
+	    }
+
+	    // Compute the current time and wake up any processes whose time has come.
+        procPtr proc;
+        while (heapPeek(&sleepHeap)->wakeTime >= USLOSS_Clock()) {
+            proc = heapRemove(&sleepHeap);
+            semvReal(proc->blockSem); 
+        }
     }
+    return 0;
 }
 
 static int
 DiskDriver(char *arg)
 {
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
     return 0;
 }
 
@@ -178,8 +199,11 @@ int sleepReal(int seconds) {
         return -1;
     }
 
-    ProcTable[getpid() % MAXPROC].wakeTime = USLOSS_CLOCK() + seconds;
-
+    procPtr proc = &ProcTable[getpid() % MAXPROC];
+    proc->wakeTime = USLOSS_Clock() + seconds*1000;
+    heapAdd(&sleepHeap, proc); // add to sleep heap
+    sempReal(proc->blockSem); // block the process
+    return 0;
 }
 
 
@@ -238,9 +262,7 @@ void initProc(int pid) {
 
     ProcTable[i].pid = pid; 
     ProcTable[i].mboxID = MboxCreate(0, 0);
-    ProcTable[i].startFunc = NULL;
-    ProcTable[i].nextProcPtr = NULL; 
-    initProcQueue(&ProcTable[i].childrenQueue, CHILDREN);
+    ProcTable[i].blockSem = 0;
 }
 
 /* empties proc struct */
@@ -251,104 +273,159 @@ void emptyProc(int pid) {
 
     ProcTable[i].pid = -1; 
     ProcTable[i].mboxID = -1;
-    ProcTable[i].startFunc = NULL;
-    ProcTable[i].nextProcPtr = NULL; 
-
     ProcTable[i].nextSleepPtr = NULL;
     ProcTable[i].wakeTime = -1;
 }
 
-/* ------------------------------------------------------------------------
-  Below are functions that manipulate ProcQueue:
-    initProcQueue, enq, deq, removeChild and peek.
-   ----------------------------------------------------------------------- */
+// /* ------------------------------------------------------------------------
+//   Below are functions that manipulate ProcQueue:
+//     initProcQueue, enq, deq, removeChild and peek.
+//    ----------------------------------------------------------------------- */
 
-/* Initialize the given procQueue */
-void initProcQueue(procQueue* q, int type) {
-  q->head = NULL;
-  q->tail = NULL;
-  q->size = 0;
-  q->type = type;
+// /* Initialize the given procQueue */
+// void initProcQueue(procQueue* q, int type) {
+//   q->head = NULL;
+//   q->tail = NULL;
+//   q->size = 0;
+//   q->type = type;
+// }
+
+// /* Add the given procPtr to the back of the given queue. */
+// // q for sleeping is really annoying, i'll f inish it later
+// void enq(procQueue* q, procPtr p) {
+//   if (q->head == NULL && q->tail == NULL) {
+//     q->head = q->tail = p;
+//   } else {
+//     if (q->type == BLOCKED)
+//       q->tail->nextProcPtr = p;
+//     else if (q->type == CHILDREN)
+//       q->tail->nextSiblingPtr = p;
+//     else if (q->type == SLEEP) {
+//         procPtr curr = q->head;
+//         procPtr prev = curr;
+//         while (curr->wakeTime < p->wakeTime) {
+//             prev = curr;
+//             curr = curr->nextSleepPtr;
+//         }
+//         p->nextSleepPtr = curr;
+//         prev->nextSleepPtr = p;
+//         q->size++;
+//         return;
+//     }
+//     q->tail = p;
+//   }
+//   q->size++;
+// }
+
+// /* Remove and return the head of the given queue. */
+// procPtr deq(procQueue* q) {
+//   procPtr temp = q->head;
+//   if (q->head == NULL) {
+//     return NULL;
+//   }
+//   if (q->head == q->tail) {
+//     q->head = q->tail = NULL; 
+//   }
+//   else {
+//     if (q->type == BLOCKED)
+//       q->head = q->head->nextProcPtr;  
+//     else if (q->type == CHILDREN)
+//       q->head = q->head->nextSiblingPtr; 
+//     else if (q->type == SLEEP) 
+//       q->head = q->head->nextSleepPtr; 
+//   }
+//   q->size--;
+//   return temp;
+// }
+
+// /* Remove the child process from the queue */
+// void removeChild3(procQueue* q, procPtr child) {
+//   if (q->head == NULL || q->type != CHILDREN)
+//     return;
+
+//   if (q->head == child) {
+//     deq(q);
+//     return;
+//   }
+
+//   procPtr prev = q->head;
+//   procPtr p = q->head->nextSiblingPtr;
+
+//   while (p != NULL) {
+//     if (p == child) {
+//       if (p == q->tail)
+//         q->tail = prev;
+//       else
+//         prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
+//       q->size--;
+//     }
+//     prev = p;
+//     p = p->nextSiblingPtr;
+//   }
+// }
+
+// /* Return the head of the given queue. */
+// procPtr peek(procQueue* q) {
+//   if (q->head == NULL) {
+//     return NULL;
+//   }
+//   return q->head;   
+// }
+
+/* Setup heap */
+void initHeap(heap* h) {
+  h->size = 0;
 }
 
-/* Add the given procPtr to the back of the given queue. */
-// q for sleeping is really annoying, i'll f inish it later
-void enq(procQueue* q, procPtr p) {
-  if (q->head == NULL && q->tail == NULL) {
-    q->head = q->tail = p;
-  } else {
-    if (q->type == BLOCKED)
-      q->tail->nextProcPtr = p;
-    else if (q->type == CHILDREN)
-      q->tail->nextSiblingPtr = p;
-    else if (q->type == SLEEP) {
-        procPtr curr = q->head;
-        procPtr prev = curr;
-        while (curr->wakeTime < p->wakeTime) {
-            prev = curr;
-            curr = curr->nextSleepPtr;
-        }
-        p->nextSleepPtr = curr;
-        prev->nextSleepPtr = p;
-        q->size++;
-        return;
-    }
-    q->tail = p;
+/* Add to heap */
+void heapAdd(heap * h, procPtr p) {
+  // add to bottom, then move up until it is in place
+  int i = h->size;
+  h->procs[h->size++] = p;
+  while (h->procs[i/2]->wakeTime > p->wakeTime) {
+    // move parent down
+    h->procs[i] = h->procs[i/2];
+    i /= 2;
   }
-  q->size++;
+  h->procs[i] = p; // put at final location
 }
 
-/* Remove and return the head of the given queue. */
-procPtr deq(procQueue* q) {
-  procPtr temp = q->head;
-  if (q->head == NULL) {
+/* Return min process on heap */
+procPtr heapPeek(heap * h) {
+    return h->procs[0];
+}
+
+/* Remove earlist waking process form the heap */
+procPtr heapRemove(heap * h) {
+  if (h->size == 0)
     return NULL;
-  }
-  if (q->head == q->tail) {
-    q->head = q->tail = NULL; 
-  }
-  else {
-    if (q->type == BLOCKED)
-      q->head = q->head->nextProcPtr;  
-    else if (q->type == CHILDREN)
-      q->head = q->head->nextSiblingPtr; 
-    else if (q->type == SLEEP) 
-      q->head = q->head->nextSleepPtr; 
-  }
-  q->size--;
-  return temp;
-}
 
-/* Remove the child process from the queue */
-void removeChild3(procQueue* q, procPtr child) {
-  if (q->head == NULL || q->type != CHILDREN)
-    return;
+  procPtr removed = h->procs[0]; // remove min
+  h->size--;
+  h->procs[0] = h->procs[h->size]; // put last in first spot
 
-  if (q->head == child) {
-    deq3(q);
-    return;
-  }
+  // re-heapify
+  int i = 0, left, right, min = 0;
+  while (i*2 <= h->size) {
+    // get locations of children
+    left = i*2 + 1;
+    right = i*2 + 2;
 
-  procPtr prev = q->head;
-  procPtr p = q->head->nextSiblingPtr;
+    // get min child
+    if (left <= h->size && h->procs[left]->wakeTime < h->procs[min]->wakeTime) 
+      min = left;
+    else if (right <= h->size && h->procs[right]->wakeTime < h->procs[min]->wakeTime) 
+      min = right;
 
-  while (p != NULL) {
-    if (p == child) {
-      if (p == q->tail)
-        q->tail = prev;
-      else
-        prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
-      q->size--;
+    // swap current with min child if needed
+    if (min != i) {
+      procPtr temp = h->procs[i];
+      h->procs[i] = h->procs[min];
+      h->procs[min] = temp;
+      i = min;
     }
-    prev = p;
-    p = p->nextSiblingPtr;
+    else
+      break; // otherwise we're done
   }
-}
-
-/* Return the head of the given queue. */
-procPtr peek(procQueue* q) {
-  if (q->head == NULL) {
-    return NULL;
-  }
-  return q->head;   
+  return removed;
 }

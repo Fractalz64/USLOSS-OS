@@ -11,7 +11,7 @@
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
-int debug4 = 0;
+int debug4 = 1;
 int 	running;
 
 static int ClockDriver(char *);
@@ -202,17 +202,25 @@ void sleep(systemArgs * args) {
 // real sleep function
 int sleepReal(int seconds) {
     requireKernelMode("sleepReal");
+
+    if (debug4) 
+        USLOSS_Console("sleepReal: called for process %d with %d seconds\n", getpid(), seconds);
+
     if (seconds < 0) {
         return -1;
     }
 
     // init/get the process
-    if (ProcTable[getpid() % MAXPROC].pid == -1) 
+    if (ProcTable[getpid() % MAXPROC].pid == -1) {
         initProc(getpid());
+    }
     procPtr proc = &ProcTable[getpid() % MAXPROC];
-
+    
     // set wake time
     proc->wakeTime = USLOSS_Clock() + seconds*1000000;
+    if (debug4) 
+        USLOSS_Console("sleepReal: set wake time for process %d to %d, adding to heap...\n", proc->pid, proc->wakeTime);
+
     heapAdd(&sleepHeap, proc); // add to sleep heap
     if (debug4) 
         USLOSS_Console("sleepReal: Process %d going to sleep until %d\n", proc->pid, proc->wakeTime);
@@ -280,6 +288,8 @@ void initProc(int pid) {
     ProcTable[i].mboxID = MboxCreate(0, 0);
     ProcTable[i].blockSem = semcreateReal(0);
     ProcTable[i].wakeTime = -1;
+    if (debug4) 
+        USLOSS_Console("initProc: initialized process %d\n", pid);
 }
 
 /* empties proc struct */
@@ -390,25 +400,27 @@ void emptyProc(int pid) {
 //   return q->head;   
 // }
 
-/* Setup heap */
+/* Setup heap, implementation based on https://gist.github.com/aatishnn/8265656 */
 void initHeap(heap* h) {
     h->size = 0;
 }
 
 /* Add to heap */
 void heapAdd(heap * h, procPtr p) {
-    // add to bottom, then move up until it is in place
-    int i = h->size;
-    h->procs[h->size++] = p;
-    while (h->procs[i/2]->wakeTime > p->wakeTime) {
+    // start from bottom and find correct place
+    int i, parent;
+    for (i = h->size; i > 0; i = parent) {
+        parent = (i-1)/2;
+        if (h->procs[parent]->wakeTime <= p->wakeTime)
+            break;
         // move parent down
-        h->procs[i] = h->procs[i/2];
-        i /= 2;
+        h->procs[i] = h->procs[parent];
     }
     h->procs[i] = p; // put at final location
+    h->size++;
     if (debug4) 
         USLOSS_Console("heapAdd: Added proc %d to heap at index %d, size = %d\n", p->pid, i, h->size);
-}
+} 
 
 /* Return min process on heap */
 procPtr heapPeek(heap * h) {

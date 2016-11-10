@@ -11,12 +11,14 @@
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
-int debug4 = 1;
+int debug4 = 0;
 int 	running;
 
 static int ClockDriver(char *);
 static int DiskDriver(char *);
 static int TermDriver(char *);
+static int TermReader(char *);
+static int TermWriter(char *);
 extern int start4();
 
 void sleep(systemArgs *);
@@ -42,6 +44,17 @@ procPtr heapRemove(heap *);
 
 procStruct ProcTable[MAXPROC];
 heap sleepHeap;
+
+
+
+
+// mailboxes for terminal device
+int charRecvMbox[USLOSS_TERM_UNITS]; // receive char
+int charSendMbox[USLOSS_TERM_UNITS]; // send char
+int lineReadMbox[USLOSS_TERM_UNITS]; // read line
+int lineWriteMbox[USLOSS_TERM_UNITS]; // write line
+int pidMbox[USLOSS_TERM_UNITS]; // pid to block
+int termInt[USLOSS_TERM_UNITS]; // interupt fo rterm
 
 void
 start3(void)
@@ -74,6 +87,16 @@ start3(void)
     systemCallVec[SYS_DISKSIZE] = diskSize;
     systemCallVec[SYS_TERMREAD] = termRead;
     systemCallVec[SYS_TERMWRITE] = termWrite;
+
+     // mboxes for terminal
+     for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        charRecvMbox[i] = MboxCreate(1, MAXLINE);
+        charSendMbox[i] = MboxCreate(1, MAXLINE);
+        lineReadMbox[i] = MboxCreate(10, MAXLINE);
+        lineWriteMbox[i] = MboxCreate(10, MAXLINE); 
+        pidMbox[i] = MboxCreate(1, sizeof(int));
+
+     }
 
     /*
      * Create clock device driver 
@@ -112,6 +135,17 @@ start3(void)
     /*
      * Create terminal device drivers.
      */
+
+     // TODO: need to zap drivers
+     for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        sprintf(termbuf, "%d", i);
+        fork1(name, TermDriver, termbuf, USLOSS_MIN_STACK, 2);
+        fork1(name, TermReader, termbuf, USLOSS_MIN_STACK, 2);
+        fork1(name, TermWriter, termbuf, USLOSS_MIN_STACK, 2);
+        sempReal(running);
+        sempReal(running);
+        sempReal(running);
+     }
 
 
     /*
@@ -175,18 +209,132 @@ DiskDriver(char *arg)
 static int
 TermDriver(char *arg)
 {
+    int result;
+    int status;
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
+
+    semvReal(running);
+    if (debug4) 
+        USLOSS_Console("TermDriver (unit %d): running\n", unit);
+
+    while (!isZapped()) {
+        result = waitDevice(USLOSS_TERM_INT, unit, &status);
+
+        if (result != 0) {
+            return 0;
+        }
+        // Try to receive character
+        int recv = USLOSS_TERM_STAT_RECV(status);
+        if (recv == USLOSS_DEV_BUSY) {
+            MboxCondSend(charRecvMbox[unit], &status, sizeof(int));
+        }
+        else if (recv == USLOSS_DEV_ERROR) {
+            if (debug4) 
+                USLOSS_Console("TermDriver RECV ERROR\n");
+        }
+        // Try to send character
+        int xmit = USLOSS_TERM_STAT_XMIT(status);
+        if (xmit == USLOSS_DEV_READY) {
+            MboxCondSend(charSendMbox[unit], &status, sizeof(int));
+        }
+        else if (xmit == USLOSS_DEV_ERROR) {
+            if (debug4) 
+                USLOSS_Console("TermDriver XMIT ERROR\n");
+        }
+    }
     return 0;
 }
 
 static int 
 TermReader(char * arg) 
 {
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
+    int i;
+    int receive; // char to receive
+    char line[MAXLINE + 1]; // line being created/read
+    int next = 0; // index in line to write char
+
+    for (i = 0; i < MAXLINE + 1; i++) { 
+        line[i] = '\0';
+    }
+
+    semvReal(running);
+    while (!isZapped()) {
+        MboxReceive(charRecvMbox[unit], &receive, sizeof(int));
+        char ch = USLOSS_TERM_STAT_CHAR(receive);
+        line[next] = ch;
+        next++;
+        if (ch == '\n' || next == MAXLINE) {
+            if (debug4) 
+                USLOSS_Console("TermReader (unit %d): line send\n", unit);
+            line[next] = '\0';
+            MboxSend(lineReadMbox[unit], line, next);
+
+            for (i = 0; i < MAXLINE + 1; i++) {
+                line[i] = '\0';
+            } 
+
+            next = 0;
+        }
+
+    }
     return 0;
 }
 
 static int 
 TermWriter(char * arg) 
 {
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
+    int i;
+    int size;
+    int ctrl;
+    int next;
+    int status;
+    char line[MAXLINE];
+
+    semvReal(running);
+    if (debug4) 
+        USLOSS_Console("TermWriter (unit %d): running\n", unit);
+
+    while (!isZapped()) {
+        size = MboxReceive(lineWriteMbox[unit], line, MAXLINE); // get line and size
+
+        // enable interrupts
+        ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+
+        if (termInt[unit] == 1) {
+            ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+            termInt[unit] = 1;
+        }
+        termInt[unit] = 1;
+
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ((void *) (long) ctrl));
+
+        next = 0;
+        while (next < size) {
+            MboxReceive(charSendMbox[unit], &status, sizeof(int));
+            int x = USLOSS_TERM_STAT_XMIT(status);
+            if (x == USLOSS_DEV_READY) {
+                ctrl = 0;
+                ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
+                ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+                ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+
+                if (termInt[unit] == 1) {
+                    ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+                    termInt[unit] = 1;
+                }
+                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ((void *) (long) ctrl));
+            }
+
+            next++;
+        }
+        int pid; 
+        MboxReceive(pidMbox[unit], &pid, sizeof(int));
+        sempReal(ProcTable[pid % MAXPROC].blockSem);
+    }
+
     return 0;
 }
 
@@ -244,11 +392,95 @@ void diskSize(systemArgs * args) {
 }
 
 void termRead(systemArgs * args) {
+    if (debug4)
+        USLOSS_Console("termRead\n");
+    requireKernelMode("termRead");
     
+    char *buffer = (char *) args->arg1;
+    int size = (long) args->arg2;
+    int unit = (long) args->arg3;
+
+    long retval = termReadReal(unit, size, buffer);
+
+    if (retval == -1) {
+        args->arg2 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) -1);
+        return;
+    }
+    args->arg2 = (void *) ((long) retval);
+    args->arg4 = (void *) ((long) 0);
+    setUserMode();
+}
+
+int termReadReal(int unit, int size, char *buffer) {
+    if (debug4)
+        USLOSS_Console("termReadReal\n");
+    requireKernelMode("termReadReal");
+
+    if (unit < 0 || unit > USLOSS_TERM_UNITS - 1 || size < 0) {
+        return -1;
+    }
+    char line[MAXLINE + 1];
+    int ctrl = 0;
+    //interrupts
+    if (termInt[unit] == 0) {
+        if (debug4)
+            USLOSS_Console("termReadReal enable interrupts\n");
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ((void *) (long) ctrl));
+        termInt[unit] = 1;
+    }
+    int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE);
+
+    if (debug4) 
+        USLOSS_Console("termReadReal (unit %d): size %d retval %d \n", unit, size, retval);
+    memcpy(buffer, line, size);
+
+    if (retval > size) {
+        retval = size;
+    }
+
+    return retval;
 }
 
 void termWrite(systemArgs * args) {
+    if (debug4)
+        USLOSS_Console("termWrite\n");
+    requireKernelMode("termWrite");
     
+    char *text = (char *) args->arg1;
+    int size = (long) args->arg2;
+    int unit = (long) args->arg3;
+
+    long retval = termWriteReal(unit, size, text);
+
+    if (retval == -1) {
+        args->arg2 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) -1);
+        return;
+    }
+    args->arg2 = (void *) ((long) retval);
+    args->arg4 = (void *) ((long) 0);
+    setUserMode(); 
+}
+
+int termWriteReal(int unit, int size, char *text) {
+    if (debug4)
+        USLOSS_Console("termWriteReal\n");
+    requireKernelMode("termWriteReal");
+
+    if (unit < 0 || unit > USLOSS_TERM_UNITS - 1 || size < 0) {
+        return -1;
+    }
+
+    int pid = getpid();
+    MboxSend(pidMbox[unit], &pid, sizeof(int));
+
+    int retval = MboxSend(lineWriteMbox[unit], text, size);
+    sempReal(ProcTable[pid % MAXPROC].blockSem);
+
+
+    return retval;
 }
 
 /* ------------------------------------------------------------------------

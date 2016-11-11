@@ -110,9 +110,9 @@ int DiskSize (int unit, int *sector, int *track, int *disk) {
 
     USLOSS_Syscall(&sysArg);
 
-    *disk = (long) sysArg.arg1;
-    *sector = (long) sysArg.arg2;
-    *track = (long) sysArg.arg3;
+    *sector = (long) sysArg.arg1;
+    *track = (long) sysArg.arg2;
+    *disk = (long) sysArg.arg3;
     return (long) sysArg.arg4;
 }
 

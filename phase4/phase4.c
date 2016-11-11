@@ -12,7 +12,7 @@
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
 int debug4 = 1;
-int 	running;
+int running;
 
 static int ClockDriver(char *);
 static int DiskDriver(char *);
@@ -26,11 +26,16 @@ void diskSize(systemArgs *);
 void termRead(systemArgs *);
 void termWrite(systemArgs *);
 int sleepReal(int);
+int diskSizeReal(int, int*, int*, int*);
+int diskWriteReal(int, int, int, int, void *);
+int diskReadReal(int, int, int, int, void *);
 void requireKernelMode(char *);
 void emptyProc(int);
 void initProc(int);
 void setUserMode();
-// void initProcQueue(procQueue*, int);
+void initDiskQueue(diskQueue*);
+void addDiskQ(diskQueue*, procPtr);
+procPtr removeDiskQ(diskQueue*);
 // void enq(procQueue*, procPtr);
 // procPtr deq(procQueue*);
 // procPtr peek(procQueue*);
@@ -40,13 +45,17 @@ void heapAdd(heap *, procPtr);
 procPtr heapPeek(heap *);
 procPtr heapRemove(heap *);
 
+/* Globals */
 procStruct ProcTable[MAXPROC];
 heap sleepHeap;
+int diskZapped; // indicates if the disk drivers are 'zapped' or not
+diskQueue diskQs[USLOSS_DISK_UNITS];
+int diskPids[2];
 
 void
 start3(void)
 {
-    char	name[128];
+    // char	name[128];
     char    termbuf[10];
     char    diskbuf[10];
     int		i;
@@ -98,14 +107,17 @@ start3(void)
      * the stack size depending on the complexity of your
      * driver, and perhaps do something with the pid returned.
      */
-    // for (i = 0; i < USLOSS_DISK_UNITS; i++) {
-    //     sprintf(diskbuf, "%d", i);
-    //     pid = fork1("Disk driver", DiskDriver, diskbuf, USLOSS_MIN_STACK, 2);
-    //     if (pid < 0) {
-    //         USLOSS_Console("start3(): Can't create disk driver %d\n", i);
-    //         USLOSS_Halt(1);
-    //     }
-    // }
+    for (i = 0; i < USLOSS_DISK_UNITS; i++) {
+        sprintf(diskbuf, "%d", i);
+        pid = fork1("Disk driver", DiskDriver, diskbuf, USLOSS_MIN_STACK, 2);
+        if (pid < 0) {
+            USLOSS_Console("start3(): Can't create disk driver %d\n", i);
+            USLOSS_Halt(1);
+        }
+
+        diskPids[i] = pid;
+        sempReal(running); // wait for driver to start running
+    }
 
     // May be other stuff to do here before going on to terminal drivers
 
@@ -129,6 +141,10 @@ start3(void)
      */
     zap(clockPID);  // clock driver
 
+    // disk drivers
+    diskZapped = 1;
+    sempReal(running); // wait for disk drivers to quit
+
     // eventually, at the end:
     quit(0);
     
@@ -143,8 +159,6 @@ ClockDriver(char *arg)
     // Let the parent know we are running and enable interrupts.
     semvReal(running);
     USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
-    if (debug4) 
-        USLOSS_Console("ClockDriver: running\n");
 
     // Infinite loop until we are zap'd
     while(! isZapped()) {
@@ -168,7 +182,47 @@ ClockDriver(char *arg)
 static int
 DiskDriver(char *arg)
 {
+    int result;
+    int status;
     int unit = atoi( (char *) arg);     // Unit is passed as arg.
+
+    // get set up in proc table
+    initProc(getpid());
+    procPtr me = &ProcTable[getpid() % MAXPROC];
+    initDiskQueue(&diskQs[unit]);
+
+    // init number of tracks
+    int temp;
+    diskSizeReal(unit, &temp, &temp, &me->diskTrack);
+
+    // Let the parent know we are running and enable interrupts.
+    semvReal(running);
+    USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
+
+    // Infinite loop until we are zap'd
+    while(! diskZapped) {
+        // block on sem until we get request
+        sempReal(me->blockSem);
+        if (diskZapped) // check  if we were zapped
+            break;
+
+        // get request off queue
+        if (diskQs[unit].size > 0) {
+            procPtr proc = removeDiskQ(&diskQs[unit]);
+            USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &proc->diskRequest);
+
+            // wait for result
+            result = waitDevice(USLOSS_DISK_DEV, unit, &status);
+            if (result != 0) {
+                return 0;
+            }
+
+            semvReal(proc->blockSem); // unblock caller
+        }
+
+    }
+
+    semvReal(running); // unblock parent
     return 0;
 }
 
@@ -190,7 +244,7 @@ TermWriter(char * arg)
     return 0;
 }
 
-// sleep function value extraction
+/* sleep function value extraction */
 void sleep(systemArgs * args) {
     requireKernelMode("sleep");
     int seconds = (long) args->arg1;
@@ -199,7 +253,7 @@ void sleep(systemArgs * args) {
     setUserMode();
 }
 
-// real sleep function
+/* real sleep function */
 int sleepReal(int seconds) {
     requireKernelMode("sleepReal");
 
@@ -230,17 +284,111 @@ int sleepReal(int seconds) {
     return 0;
 }
 
-
+/*
+    sysArg.arg1 = diskBuffer;
+    sysArg.arg2 = (void *) ((long) sectors);
+    sysArg.arg3 = (void *) ((long) track);
+    sysArg.arg4 = (void *) ((long) first);
+    sysArg.arg5 = (void *) ((long) unit);
+*/
 void diskRead(systemArgs * args) {
-    
+    requireKernelMode("diskRead");
 }
 
 void diskWrite(systemArgs * args) {
-    
+    requireKernelMode("diskWrite");
+
+    int sectors = (long) args->arg2;
+    int track = (long) args->arg3;
+    int first = (long) args->arg4;
+    int unit = (long) args->arg5;
+
+    int retval = diskWriteReal(unit, first, track, sectors, args->arg1);
+    setUserMode();
 }
 
+int diskWriteReal(int unit, int track, int first, int sectors, void *buffer) {
+    requireKernelMode("diskWriteReal");
+
+    // check args!!!
+
+    // init/get the process
+    if (ProcTable[getpid() % MAXPROC].pid == -1) {
+        initProc(getpid());
+    }
+    procPtr proc = &ProcTable[getpid() % MAXPROC];
+
+    proc->diskRequest.opr = USLOSS_DISK_WRITE;
+    proc->diskRequest.reg1 = (void *) ((long) first);
+    proc->diskRequest.reg1 = buffer;
+
+    return 0;
+}
+
+/* extract values from sysargs and call diskSizeReal */
 void diskSize(systemArgs * args) {
-    
+    requireKernelMode("diskSize");
+    int unit = (long) args->arg1;
+    int sector, track, disk;
+    int retval = diskSizeReal(unit, &sector, &track, &disk);
+    args->arg1 = (void *) ((long) sector);
+    args->arg2 = (void *) ((long) track);
+    args->arg3 = (void *) ((long) disk);
+    args->arg4 = (void *) ((long) retval);
+    setUserMode();
+}
+
+/*------------------------------------------------------------------------
+    diskSizeReal: Puts values into pointers for the size of a sector, 
+    number of sectors per track, and number of tracks on the disk for the 
+    given unit. 
+    Returns: -1 if given illegal input, 0 otherwise
+ ------------------------------------------------------------------------*/
+int diskSizeReal(int unit, int *sector, int *track, int *disk) {
+    requireKernelMode("diskSizeReal");
+
+    // check for illegal args
+    if (unit < 0 || unit > 1 || sector == NULL || track == NULL || disk == NULL) {
+        if (debug4)
+            USLOSS_Console("diskSizeReal: given illegal argument(s), returning -1\n");
+        return -1;
+    }
+
+    procPtr driver = &ProcTable[diskPids[unit]];
+
+    // get the number of tracks for the first time
+    if (driver->diskTrack == -1) {
+        // init/get the process
+        if (ProcTable[getpid() % MAXPROC].pid == -1) {
+            initProc(getpid());
+        }
+        procPtr proc = &ProcTable[getpid() % MAXPROC];
+
+        // set variables
+        proc->diskTrack = 0;
+        USLOSS_DeviceRequest request;
+        request.opr = USLOSS_DISK_TRACKS;
+        request.reg1 = &driver->diskTrack;
+        proc->diskRequest = request;
+
+        addDiskQ(&diskQs[unit], proc); // add to disk queue 
+        semvReal(driver->blockSem);  // wake up disk driver
+
+        if (debug4)
+            USLOSS_Console("diskSizeReal: added pid %d to disk queue for unit %d, size = %d, blocking...\n", proc->pid, unit, diskQs[unit].size);
+
+        sempReal(proc->blockSem); // block
+
+        int status;
+        USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
+        if (debug4)
+            USLOSS_Console("diskSizeReal: after reading track size for unit %d, status = %d\n", unit, status);
+    }
+
+    *sector = USLOSS_DISK_SECTOR_SIZE;
+    *track = USLOSS_DISK_TRACK_SIZE;
+    *disk = driver->diskTrack;
+    return 0;
 }
 
 void termRead(systemArgs * args) {
@@ -288,8 +436,9 @@ void initProc(int pid) {
     ProcTable[i].mboxID = MboxCreate(0, 0);
     ProcTable[i].blockSem = semcreateReal(0);
     ProcTable[i].wakeTime = -1;
-    if (debug4) 
-        USLOSS_Console("initProc: initialized process %d\n", pid);
+    ProcTable[i].diskTrack = -1;
+    ProcTable[i].nextDiskPtr = NULL;
+    ProcTable[i].prevDiskPtr = NULL;
 }
 
 /* empties proc struct */
@@ -300,54 +449,105 @@ void emptyProc(int pid) {
 
     ProcTable[i].pid = -1; 
     ProcTable[i].mboxID = -1;
-    ProcTable[i].mboxID = -1;
     ProcTable[i].blockSem = -1;
     ProcTable[i].wakeTime = -1;
+    ProcTable[i].nextDiskPtr = NULL;
+    ProcTable[i].prevDiskPtr = NULL;
 }
 
-// /* ------------------------------------------------------------------------
-//   Below are functions that manipulate ProcQueue:
-//     initProcQueue, enq, deq, removeChild and peek.
-//    ----------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------
+  Functions for the dskQueue and heap.
+   ----------------------------------------------------------------------- */
 
-// /* Initialize the given procQueue */
-// void initProcQueue(procQueue* q, int type) {
-//   q->head = NULL;
-//   q->tail = NULL;
-//   q->size = 0;
-//   q->type = type;
-// }
+/* Initialize the given diskQueue */
+void initDiskQueue(diskQueue* q) {
+    q->head = NULL;
+    q->tail = NULL;
+    q->curr = NULL;
+    q->size = 0;
+}
 
-// /* Add the given procPtr to the back of the given queue. */
-// // q for sleeping is really annoying, i'll f inish it later
-// void enq(procQueue* q, procPtr p) {
+/* Adds the proc pointer to the disk queue in sorted order */
+void addDiskQ(diskQueue* q, procPtr p) {
+    if (debug4)
+        USLOSS_Console("addDiskQ: adding pid %d, track %d to queue\n", p->pid, p->diskTrack);
+    // first add
+    if (q->head == NULL) { 
+        q->head = q->tail = p;
+        q->head->nextDiskPtr = q->tail->nextDiskPtr = NULL;
+        q->head->prevDiskPtr = q->tail->prevDiskPtr = NULL;
+    }
+    else {
+        // find the right location to add
+        procPtr prev = q->tail;
+        procPtr next = q->head;
+        while (next->diskTrack < p->diskTrack) {
+            prev = next;
+            next = next->nextDiskPtr;
+            if (next == q->head)
+                break;
+        }
+        prev->nextDiskPtr = p;
+        p->prevDiskPtr = prev;
+        p->nextDiskPtr = next;
+        next->prevDiskPtr = p;
+        if (p->diskTrack < q->head->diskTrack)
+            q->head = p; // update head
+        if (p->diskTrack > q->tail->diskTrack)
+            q->tail = p; // update tail
+    }
+    q->size++;
+    if (debug4)
+        USLOSS_Console("addDiskQ: add complete, size = %d\n", q->size);
+} 
+
+/* Returns and removes the next proc on the disk queue */
+procPtr removeDiskQ(diskQueue* q) {
+    if (q->curr == NULL) {
+        q->curr = q->head;
+    }
+
+    procPtr temp = q->curr;
+
+    if (q->curr == q->head) { // remove head
+        q->head = q->head->nextDiskPtr;
+        q->head->prevDiskPtr = q->tail;
+        q->tail->nextDiskPtr = q->head;
+        q->curr = q->head;
+    }
+
+    else if (q->curr == q->tail) {
+        q->tail = q->tail->prevDiskPtr;
+        q->tail->nextDiskPtr = q->head;
+        q->head->prevDiskPtr = q->tail;
+        q->curr = q->tail;
+    }
+
+    else {
+        q->curr->prevDiskPtr->nextDiskPtr = q->curr->nextDiskPtr;
+        q->curr->nextDiskPtr->prevDiskPtr = q->curr->prevDiskPtr;
+        q->curr = q->curr->nextDiskPtr;
+    }
+
+
+    q->size--;
+    return temp;
+} 
+
+// /* Add the given procPtr3 to the back of the given queue. */
+// void enq3(procQueue* q, procPtr3 p) {
 //   if (q->head == NULL && q->tail == NULL) {
 //     q->head = q->tail = p;
 //   } else {
-//     if (q->type == BLOCKED)
-//       q->tail->nextProcPtr = p;
-//     else if (q->type == CHILDREN)
-//       q->tail->nextSiblingPtr = p;
-//     else if (q->type == SLEEP) {
-//         procPtr curr = q->head;
-//         procPtr prev = curr;
-//         while (curr->wakeTime < p->wakeTime) {
-//             prev = curr;
-//             curr = curr->nextSleepPtr;
-//         }
-//         p->nextSleepPtr = curr;
-//         prev->nextSleepPtr = p;
-//         q->size++;
-//         return;
-//     }
+//     q->tail->nextDiskPtr = p;
 //     q->tail = p;
 //   }
 //   q->size++;
 // }
 
 // /* Remove and return the head of the given queue. */
-// procPtr deq(procQueue* q) {
-//   procPtr temp = q->head;
+// procPtr3 deq3(procQueue* q) {
+//   procPtr3 temp = q->head;
 //   if (q->head == NULL) {
 //     return NULL;
 //   }
@@ -355,41 +555,10 @@ void emptyProc(int pid) {
 //     q->head = q->tail = NULL; 
 //   }
 //   else {
-//     if (q->type == BLOCKED)
-//       q->head = q->head->nextProcPtr;  
-//     else if (q->type == CHILDREN)
-//       q->head = q->head->nextSiblingPtr; 
-//     else if (q->type == SLEEP) 
-//       q->head = q->head->nextSleepPtr; 
+//     q->head = q->head->nextDiskPtr;  
 //   }
 //   q->size--;
 //   return temp;
-// }
-
-// /* Remove the child process from the queue */
-// void removeChild3(procQueue* q, procPtr child) {
-//   if (q->head == NULL || q->type != CHILDREN)
-//     return;
-
-//   if (q->head == child) {
-//     deq(q);
-//     return;
-//   }
-
-//   procPtr prev = q->head;
-//   procPtr p = q->head->nextSiblingPtr;
-
-//   while (p != NULL) {
-//     if (p == child) {
-//       if (p == q->tail)
-//         q->tail = prev;
-//       else
-//         prev->nextSiblingPtr = p->nextSiblingPtr->nextSiblingPtr;
-//       q->size--;
-//     }
-//     prev = p;
-//     p = p->nextSiblingPtr;
-//   }
 // }
 
 // /* Return the head of the given queue. */

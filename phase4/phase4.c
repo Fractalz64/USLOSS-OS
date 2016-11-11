@@ -45,9 +45,6 @@ procPtr heapRemove(heap *);
 procStruct ProcTable[MAXPROC];
 heap sleepHeap;
 
-
-
-
 // mailboxes for terminal device
 int charRecvMbox[USLOSS_TERM_UNITS]; // receive char
 int charSendMbox[USLOSS_TERM_UNITS]; // send char
@@ -55,6 +52,9 @@ int lineReadMbox[USLOSS_TERM_UNITS]; // read line
 int lineWriteMbox[USLOSS_TERM_UNITS]; // write line
 int pidMbox[USLOSS_TERM_UNITS]; // pid to block
 int termInt[USLOSS_TERM_UNITS]; // interupt fo rterm
+
+int termProcTable[USLOSS_TERM_UNITS][3]; // keep track of term procs
+
 
 void
 start3(void)
@@ -136,12 +136,11 @@ start3(void)
      * Create terminal device drivers.
      */
 
-     // TODO: need to zap drivers
      for (i = 0; i < USLOSS_TERM_UNITS; i++) {
-        sprintf(termbuf, "%d", i);
-        fork1(name, TermDriver, termbuf, USLOSS_MIN_STACK, 2);
-        fork1(name, TermReader, termbuf, USLOSS_MIN_STACK, 2);
-        fork1(name, TermWriter, termbuf, USLOSS_MIN_STACK, 2);
+        sprintf(termbuf, "%d", i); 
+        termProcTable[i][0] = fork1(name, TermDriver, termbuf, USLOSS_MIN_STACK, 2);
+        termProcTable[i][1] = fork1(name, TermReader, termbuf, USLOSS_MIN_STACK, 2);
+        termProcTable[i][2] = fork1(name, TermWriter, termbuf, USLOSS_MIN_STACK, 2);
         sempReal(running);
         sempReal(running);
         sempReal(running);
@@ -161,7 +160,40 @@ start3(void)
     /*
      * Zap the device drivers
      */
+
+    status = 0;
     zap(clockPID);  // clock driver
+    join(&status);
+
+    // zap termreader
+    for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        MboxSend(charRecvMbox[i], NULL, 0);
+        zap(termProcTable[i][1]);
+        join(&status);
+    }
+
+    // zap termwriter
+    for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        MboxSend(lineWriteMbox[i], NULL, 0);
+        zap(termProcTable[i][2]);
+        join(&status);
+    }
+
+    // zap termdriver
+    char filename[50];
+    for(i = 0; i < USLOSS_TERM_UNITS; i++)
+    {
+        int ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)((long) ctrl));
+        sprintf(filename, "term%d.in", i);
+        FILE *f = fopen(filename, "a+");
+        fprintf(f, "last line\n");
+        fflush(f);
+        fclose(f);
+        zap(termProcTable[i][0]);
+        join(&status);
+    }
 
     // eventually, at the end:
     quit(0);
@@ -218,8 +250,8 @@ TermDriver(char *arg)
         USLOSS_Console("TermDriver (unit %d): running\n", unit);
 
     while (!isZapped()) {
-        result = waitDevice(USLOSS_TERM_INT, unit, &status);
 
+        result = waitDevice(USLOSS_TERM_INT, unit, &status);
         if (result != 0) {
             return 0;
         }
@@ -242,6 +274,7 @@ TermDriver(char *arg)
                 USLOSS_Console("TermDriver XMIT ERROR\n");
         }
     }
+
     return 0;
 }
 
@@ -260,20 +293,24 @@ TermReader(char * arg)
 
     semvReal(running);
     while (!isZapped()) {
+        // receieve characters
         MboxReceive(charRecvMbox[unit], &receive, sizeof(int));
         char ch = USLOSS_TERM_STAT_CHAR(receive);
         line[next] = ch;
         next++;
+
+        // receive line
         if (ch == '\n' || next == MAXLINE) {
             if (debug4) 
                 USLOSS_Console("TermReader (unit %d): line send\n", unit);
-            line[next] = '\0';
+
+            line[next] = '\0'; // end with null
             MboxSend(lineReadMbox[unit], line, next);
 
+            // reset line
             for (i = 0; i < MAXLINE + 1; i++) {
                 line[i] = '\0';
             } 
-
             next = 0;
         }
 
@@ -287,7 +324,7 @@ TermWriter(char * arg)
     int unit = atoi( (char *) arg);     // Unit is passed as arg.
     int i;
     int size;
-    int ctrl;
+    int ctrl = 0;
     int next;
     int status;
     char line[MAXLINE];
@@ -299,40 +336,46 @@ TermWriter(char * arg)
     while (!isZapped()) {
         size = MboxReceive(lineWriteMbox[unit], line, MAXLINE); // get line and size
 
-        // enable interrupts
-        ctrl = 0;
+        if (isZapped())
+            break;
+
+        // enable xmit interrupt and receive interrupt
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
 
-        if (termInt[unit] == 1) {
-            ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-            termInt[unit] = 1;
-        }
-        termInt[unit] = 1;
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
 
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ((void *) (long) ctrl));
-
+        // xmit the line
         next = 0;
         while (next < size) {
             MboxReceive(charSendMbox[unit], &status, sizeof(int));
+
+            // xmit the character
             int x = USLOSS_TERM_STAT_XMIT(status);
             if (x == USLOSS_DEV_READY) {
+                //USLOSS_Console("%c string %d unit\n", line[next], unit);
+
                 ctrl = 0;
-                ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
                 ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+                ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
+                ctrl = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl);
                 ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
 
-                if (termInt[unit] == 1) {
-                    ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-                    termInt[unit] = 1;
-                }
-                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ((void *) (long) ctrl));
+                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
             }
 
             next++;
         }
+
+        // disable xmit int
+        ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        termInt[unit] = 0;
         int pid; 
+        semvReal(ProcTable[pid % MAXPROC].blockSem);
         MboxReceive(pidMbox[unit], &pid, sizeof(int));
-        sempReal(ProcTable[pid % MAXPROC].blockSem);
+        
     }
 
     return 0;
@@ -422,12 +465,13 @@ int termReadReal(int unit, int size, char *buffer) {
     }
     char line[MAXLINE + 1];
     int ctrl = 0;
+
     //interrupts
     if (termInt[unit] == 0) {
         if (debug4)
             USLOSS_Console("termReadReal enable interrupts\n");
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ((void *) (long) ctrl));
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
         termInt[unit] = 1;
     }
     int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE);
@@ -477,10 +521,11 @@ int termWriteReal(int unit, int size, char *text) {
     MboxSend(pidMbox[unit], &pid, sizeof(int));
 
     int retval = MboxSend(lineWriteMbox[unit], text, size);
+    //USLOSS_Console("%s string %d size\n", text, size);
+
     sempReal(ProcTable[pid % MAXPROC].blockSem);
 
-
-    return retval;
+    return size;
 }
 
 /* ------------------------------------------------------------------------

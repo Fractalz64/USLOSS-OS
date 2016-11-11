@@ -17,6 +17,8 @@ int running;
 static int ClockDriver(char *);
 static int DiskDriver(char *);
 static int TermDriver(char *);
+static int TermReader(char *);
+static int TermWriter(char *);
 extern int start4();
 
 void sleep(systemArgs *);
@@ -36,10 +38,6 @@ void setUserMode();
 void initDiskQueue(diskQueue*);
 void addDiskQ(diskQueue*, procPtr);
 procPtr removeDiskQ(diskQueue*);
-// void enq(procQueue*, procPtr);
-// procPtr deq(procQueue*);
-// procPtr peek(procQueue*);
-// void removeChild3(procQueue*, procPtr);
 void initHeap(heap *);
 void heapAdd(heap *, procPtr);
 procPtr heapPeek(heap *);
@@ -49,13 +47,24 @@ procPtr heapRemove(heap *);
 procStruct ProcTable[MAXPROC];
 heap sleepHeap;
 int diskZapped; // indicates if the disk drivers are 'zapped' or not
-diskQueue diskQs[USLOSS_DISK_UNITS];
-int diskPids[2];
+diskQueue diskQs[USLOSS_DISK_UNITS]; // queues for disk drivers
+int diskPids[USLOSS_DISK_UNITS]; // pids of the disk drivers
+
+// mailboxes for terminal device
+int charRecvMbox[USLOSS_TERM_UNITS]; // receive char
+int charSendMbox[USLOSS_TERM_UNITS]; // send char
+int lineReadMbox[USLOSS_TERM_UNITS]; // read line
+int lineWriteMbox[USLOSS_TERM_UNITS]; // write line
+int pidMbox[USLOSS_TERM_UNITS]; // pid to block
+int termInt[USLOSS_TERM_UNITS]; // interupt fo rterm
+
+int termProcTable[USLOSS_TERM_UNITS][3]; // keep track of term procs
+
 
 void
 start3(void)
 {
-    // char	name[128];
+    char	name[128];
     char    termbuf[10];
     char    diskbuf[10];
     int		i;
@@ -84,6 +93,15 @@ start3(void)
     systemCallVec[SYS_TERMREAD] = termRead;
     systemCallVec[SYS_TERMWRITE] = termWrite;
 
+    // mboxes for terminal
+    for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        charRecvMbox[i] = MboxCreate(1, MAXLINE);
+        charSendMbox[i] = MboxCreate(1, MAXLINE);
+        lineReadMbox[i] = MboxCreate(10, MAXLINE);
+        lineWriteMbox[i] = MboxCreate(10, MAXLINE); 
+        pidMbox[i] = MboxCreate(1, sizeof(int));
+    }
+
     /*
      * Create clock device driver 
      * I am assuming a semaphore here for coordination.  A mailbox can
@@ -107,6 +125,7 @@ start3(void)
      * the stack size depending on the complexity of your
      * driver, and perhaps do something with the pid returned.
      */
+    int temp;
     for (i = 0; i < USLOSS_DISK_UNITS; i++) {
         sprintf(diskbuf, "%d", i);
         pid = fork1("Disk driver", DiskDriver, diskbuf, USLOSS_MIN_STACK, 2);
@@ -117,13 +136,27 @@ start3(void)
 
         diskPids[i] = pid;
         sempReal(running); // wait for driver to start running
+
+        // get number of tracks
+        diskSizeReal(i, &temp, &temp, &ProcTable[pid % MAXPROC].diskTrack);
     }
+
 
     // May be other stuff to do here before going on to terminal drivers
 
     /*
      * Create terminal device drivers.
      */
+
+     for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        sprintf(termbuf, "%d", i); 
+        termProcTable[i][0] = fork1(name, TermDriver, termbuf, USLOSS_MIN_STACK, 2);
+        termProcTable[i][1] = fork1(name, TermReader, termbuf, USLOSS_MIN_STACK, 2);
+        termProcTable[i][2] = fork1(name, TermWriter, termbuf, USLOSS_MIN_STACK, 2);
+        sempReal(running);
+        sempReal(running);
+        sempReal(running);
+     }
 
 
     /*
@@ -139,11 +172,44 @@ start3(void)
     /*
      * Zap the device drivers
      */
+
+    status = 0;
     zap(clockPID);  // clock driver
+    join(&status);
+
+    // zap termreader
+    for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        MboxSend(charRecvMbox[i], NULL, 0);
+        zap(termProcTable[i][1]);
+        join(&status);
+    }
+
+    // zap termwriter
+    for (i = 0; i < USLOSS_TERM_UNITS; i++) {
+        MboxSend(lineWriteMbox[i], NULL, 0);
+        zap(termProcTable[i][2]);
+        join(&status);
+    }
+
+    // zap termdriver
+    char filename[50];
+    for(i = 0; i < USLOSS_TERM_UNITS; i++)
+    {
+        int ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)((long) ctrl));
+        sprintf(filename, "term%d.in", i);
+        FILE *f = fopen(filename, "a+");
+        fprintf(f, "last line\n");
+        fflush(f);
+        fclose(f);
+        zap(termProcTable[i][0]);
+        join(&status);
+    }
 
     // disk drivers
     diskZapped = 1;
-    sempReal(running); // wait for disk drivers to quit
+    join(&status);
 
     // eventually, at the end:
     quit(0);
@@ -191,9 +257,9 @@ DiskDriver(char *arg)
     procPtr me = &ProcTable[getpid() % MAXPROC];
     initDiskQueue(&diskQs[unit]);
 
-    // init number of tracks
-    int temp;
-    diskSizeReal(unit, &temp, &temp, &me->diskTrack);
+    if (debug4) {
+        USLOSS_Console("DiskDriver: unit %d started, pid = %d\n", unit, me->pid);
+    }
 
     // Let the parent know we are running and enable interrupts.
     semvReal(running);
@@ -203,12 +269,18 @@ DiskDriver(char *arg)
     while(! diskZapped) {
         // block on sem until we get request
         sempReal(me->blockSem);
+        if (debug4) {
+            USLOSS_Console("DiskDriver: unit %d unblocked, zapped = %d, queue size = %d\n", unit, diskZapped, diskQs[unit].size);
+        }
         if (diskZapped) // check  if we were zapped
             break;
 
         // get request off queue
         if (diskQs[unit].size > 0) {
             procPtr proc = removeDiskQ(&diskQs[unit]);
+            if (debug4) {
+                USLOSS_Console("DiskDriver: taking request from pid %d, track %d\n", proc->pid, proc->diskTrack);
+            }
             USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &proc->diskRequest);
 
             // wait for result
@@ -217,6 +289,10 @@ DiskDriver(char *arg)
                 return 0;
             }
 
+            result = USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
+            if (debug4) {
+                USLOSS_Console("DiskDriver: finished request from pid %d, result = %d, status = %d\n", proc->pid, result, status);
+            }
             semvReal(proc->blockSem); // unblock caller
         }
 
@@ -229,18 +305,143 @@ DiskDriver(char *arg)
 static int
 TermDriver(char *arg)
 {
+    int result;
+    int status;
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
+
+    semvReal(running);
+    if (debug4) 
+        USLOSS_Console("TermDriver (unit %d): running\n", unit);
+
+    while (!isZapped()) {
+
+        result = waitDevice(USLOSS_TERM_INT, unit, &status);
+        if (result != 0) {
+            return 0;
+        }
+        // Try to receive character
+        int recv = USLOSS_TERM_STAT_RECV(status);
+        if (recv == USLOSS_DEV_BUSY) {
+            MboxCondSend(charRecvMbox[unit], &status, sizeof(int));
+        }
+        else if (recv == USLOSS_DEV_ERROR) {
+            if (debug4) 
+                USLOSS_Console("TermDriver RECV ERROR\n");
+        }
+        // Try to send character
+        int xmit = USLOSS_TERM_STAT_XMIT(status);
+        if (xmit == USLOSS_DEV_READY) {
+            MboxCondSend(charSendMbox[unit], &status, sizeof(int));
+        }
+        else if (xmit == USLOSS_DEV_ERROR) {
+            if (debug4) 
+                USLOSS_Console("TermDriver XMIT ERROR\n");
+        }
+    }
+
     return 0;
 }
 
 static int 
 TermReader(char * arg) 
 {
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
+    int i;
+    int receive; // char to receive
+    char line[MAXLINE + 1]; // line being created/read
+    int next = 0; // index in line to write char
+
+    for (i = 0; i < MAXLINE + 1; i++) { 
+        line[i] = '\0';
+    }
+
+    semvReal(running);
+    while (!isZapped()) {
+        // receieve characters
+        MboxReceive(charRecvMbox[unit], &receive, sizeof(int));
+        char ch = USLOSS_TERM_STAT_CHAR(receive);
+        line[next] = ch;
+        next++;
+
+        // receive line
+        if (ch == '\n' || next == MAXLINE) {
+            if (debug4) 
+                USLOSS_Console("TermReader (unit %d): line send\n", unit);
+
+            line[next] = '\0'; // end with null
+            MboxSend(lineReadMbox[unit], line, next);
+
+            // reset line
+            for (i = 0; i < MAXLINE + 1; i++) {
+                line[i] = '\0';
+            } 
+            next = 0;
+        }
+
+    }
     return 0;
 }
 
 static int 
 TermWriter(char * arg) 
 {
+    int unit = atoi( (char *) arg);     // Unit is passed as arg.
+    int i;
+    int size;
+    int ctrl = 0;
+    int next;
+    int status;
+    char line[MAXLINE];
+
+    semvReal(running);
+    if (debug4) 
+        USLOSS_Console("TermWriter (unit %d): running\n", unit);
+
+    while (!isZapped()) {
+        size = MboxReceive(lineWriteMbox[unit], line, MAXLINE); // get line and size
+
+        if (isZapped())
+            break;
+
+        // enable xmit interrupt and receive interrupt
+        ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+
+        // xmit the line
+        next = 0;
+        while (next < size) {
+            MboxReceive(charSendMbox[unit], &status, sizeof(int));
+
+            // xmit the character
+            int x = USLOSS_TERM_STAT_XMIT(status);
+            if (x == USLOSS_DEV_READY) {
+                //USLOSS_Console("%c string %d unit\n", line[next], unit);
+
+                ctrl = 0;
+                ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+                ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
+                ctrl = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl);
+                ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+
+                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+            }
+
+            next++;
+        }
+
+        // disable xmit int
+        ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        termInt[unit] = 0;
+        int pid; 
+        semvReal(ProcTable[pid % MAXPROC].blockSem);
+        MboxReceive(pidMbox[unit], &pid, sizeof(int));
+        
+    }
+
     return 0;
 }
 
@@ -284,13 +485,6 @@ int sleepReal(int seconds) {
     return 0;
 }
 
-/*
-    sysArg.arg1 = diskBuffer;
-    sysArg.arg2 = (void *) ((long) sectors);
-    sysArg.arg3 = (void *) ((long) track);
-    sysArg.arg4 = (void *) ((long) first);
-    sysArg.arg5 = (void *) ((long) unit);
-*/
 void diskRead(systemArgs * args) {
     requireKernelMode("diskRead");
 }
@@ -373,16 +567,12 @@ int diskSizeReal(int unit, int *sector, int *track, int *disk) {
 
         addDiskQ(&diskQs[unit], proc); // add to disk queue 
         semvReal(driver->blockSem);  // wake up disk driver
-
-        if (debug4)
-            USLOSS_Console("diskSizeReal: added pid %d to disk queue for unit %d, size = %d, blocking...\n", proc->pid, unit, diskQs[unit].size);
-
         sempReal(proc->blockSem); // block
 
         int status;
-        USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
+        int what = USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
         if (debug4)
-            USLOSS_Console("diskSizeReal: after reading track size for unit %d, status = %d\n", unit, status);
+            USLOSS_Console("diskSizeReal: number of tracks on unit %d: %d\n", unit, driver->diskTrack);
     }
 
     *sector = USLOSS_DISK_SECTOR_SIZE;
@@ -392,11 +582,97 @@ int diskSizeReal(int unit, int *sector, int *track, int *disk) {
 }
 
 void termRead(systemArgs * args) {
+    if (debug4)
+        USLOSS_Console("termRead\n");
+    requireKernelMode("termRead");
     
+    char *buffer = (char *) args->arg1;
+    int size = (long) args->arg2;
+    int unit = (long) args->arg3;
+
+    long retval = termReadReal(unit, size, buffer);
+
+    if (retval == -1) {
+        args->arg2 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) -1);
+        return;
+    }
+    args->arg2 = (void *) ((long) retval);
+    args->arg4 = (void *) ((long) 0);
+    setUserMode();
+}
+
+int termReadReal(int unit, int size, char *buffer) {
+    if (debug4)
+        USLOSS_Console("termReadReal\n");
+    requireKernelMode("termReadReal");
+
+    if (unit < 0 || unit > USLOSS_TERM_UNITS - 1 || size < 0) {
+        return -1;
+    }
+    char line[MAXLINE + 1];
+    int ctrl = 0;
+
+    //interrupts
+    if (termInt[unit] == 0) {
+        if (debug4)
+            USLOSS_Console("termReadReal enable interrupts\n");
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        termInt[unit] = 1;
+    }
+    int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE);
+
+    if (debug4) 
+        USLOSS_Console("termReadReal (unit %d): size %d retval %d \n", unit, size, retval);
+    memcpy(buffer, line, size);
+
+    if (retval > size) {
+        retval = size;
+    }
+
+    return retval;
 }
 
 void termWrite(systemArgs * args) {
+    if (debug4)
+        USLOSS_Console("termWrite\n");
+    requireKernelMode("termWrite");
     
+    char *text = (char *) args->arg1;
+    int size = (long) args->arg2;
+    int unit = (long) args->arg3;
+
+    long retval = termWriteReal(unit, size, text);
+
+    if (retval == -1) {
+        args->arg2 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) -1);
+        return;
+    }
+    args->arg2 = (void *) ((long) retval);
+    args->arg4 = (void *) ((long) 0);
+    setUserMode(); 
+}
+
+int termWriteReal(int unit, int size, char *text) {
+    if (debug4)
+        USLOSS_Console("termWriteReal\n");
+    requireKernelMode("termWriteReal");
+
+    if (unit < 0 || unit > USLOSS_TERM_UNITS - 1 || size < 0) {
+        return -1;
+    }
+
+    int pid = getpid();
+    MboxSend(pidMbox[unit], &pid, sizeof(int));
+
+    int retval = MboxSend(lineWriteMbox[unit], text, size);
+    //USLOSS_Console("%s string %d size\n", text, size);
+
+    sempReal(ProcTable[pid % MAXPROC].blockSem);
+
+    return size;
 }
 
 /* ------------------------------------------------------------------------
@@ -471,6 +747,7 @@ void initDiskQueue(diskQueue* q) {
 void addDiskQ(diskQueue* q, procPtr p) {
     if (debug4)
         USLOSS_Console("addDiskQ: adding pid %d, track %d to queue\n", p->pid, p->diskTrack);
+
     // first add
     if (q->head == NULL) { 
         q->head = q->tail = p;
@@ -503,71 +780,49 @@ void addDiskQ(diskQueue* q, procPtr p) {
 
 /* Returns and removes the next proc on the disk queue */
 procPtr removeDiskQ(diskQueue* q) {
+    if (q->size == 0)
+        return NULL;
+
     if (q->curr == NULL) {
         q->curr = q->head;
     }
 
+    if (debug4)
+        USLOSS_Console("removeDiskQ: called, size = %d, curr pid = %d, curr track = %d\n", q->size, q->curr->pid, q->curr->diskTrack);
+
     procPtr temp = q->curr;
 
-    if (q->curr == q->head) { // remove head
+    if (q->size == 1) { // remove only node
+        q->head = q->tail = NULL;
+    }
+
+    else if (q->curr == q->head) { // remove head
         q->head = q->head->nextDiskPtr;
         q->head->prevDiskPtr = q->tail;
         q->tail->nextDiskPtr = q->head;
         q->curr = q->head;
     }
 
-    else if (q->curr == q->tail) {
+    else if (q->curr == q->tail) { // remove tail
         q->tail = q->tail->prevDiskPtr;
         q->tail->nextDiskPtr = q->head;
         q->head->prevDiskPtr = q->tail;
         q->curr = q->tail;
     }
 
-    else {
+    else { // remove other
         q->curr->prevDiskPtr->nextDiskPtr = q->curr->nextDiskPtr;
         q->curr->nextDiskPtr->prevDiskPtr = q->curr->prevDiskPtr;
         q->curr = q->curr->nextDiskPtr;
     }
 
+    if (debug4)
+        USLOSS_Console("removeDiskQ: removed curr pid = %d, curr track = %d, size = %d\n", q->size, temp->pid, temp->diskTrack);
 
     q->size--;
     return temp;
 } 
 
-// /* Add the given procPtr3 to the back of the given queue. */
-// void enq3(procQueue* q, procPtr3 p) {
-//   if (q->head == NULL && q->tail == NULL) {
-//     q->head = q->tail = p;
-//   } else {
-//     q->tail->nextDiskPtr = p;
-//     q->tail = p;
-//   }
-//   q->size++;
-// }
-
-// /* Remove and return the head of the given queue. */
-// procPtr3 deq3(procQueue* q) {
-//   procPtr3 temp = q->head;
-//   if (q->head == NULL) {
-//     return NULL;
-//   }
-//   if (q->head == q->tail) {
-//     q->head = q->tail = NULL; 
-//   }
-//   else {
-//     q->head = q->head->nextDiskPtr;  
-//   }
-//   q->size--;
-//   return temp;
-// }
-
-// /* Return the head of the given queue. */
-// procPtr peek(procQueue* q) {
-//   if (q->head == NULL) {
-//     return NULL;
-//   }
-//   return q->head;   
-// }
 
 /* Setup heap, implementation based on https://gist.github.com/aatishnn/8265656 */
 void initHeap(heap* h) {

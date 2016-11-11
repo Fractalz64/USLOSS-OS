@@ -8,6 +8,7 @@
 #include <usyscall.h>
 #include <stdlib.h> /* needed for atoi() */
 #include <stdio.h>
+#include <string.h> /* needed for memcpy() */
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
@@ -27,7 +28,11 @@ void diskWrite(systemArgs *);
 void diskSize(systemArgs *);
 void termRead(systemArgs *);
 void termWrite(systemArgs *);
+
 int sleepReal(int);
+int termReadReal(int, int, char *);
+int termWriteReal(int, int, char *);
+
 void requireKernelMode(char *);
 void emptyProc(int);
 void initProc(int);
@@ -51,7 +56,7 @@ int charSendMbox[USLOSS_TERM_UNITS]; // send char
 int lineReadMbox[USLOSS_TERM_UNITS]; // read line
 int lineWriteMbox[USLOSS_TERM_UNITS]; // write line
 int pidMbox[USLOSS_TERM_UNITS]; // pid to block
-int termInt[USLOSS_TERM_UNITS]; // interupt fo rterm
+int termInt[USLOSS_TERM_UNITS]; // interupt for term (control writing)
 
 int termProcTable[USLOSS_TERM_UNITS][3]; // keep track of term procs
 
@@ -163,7 +168,9 @@ start3(void)
      */
 
     status = 0;
-    zap(clockPID);  // clock driver
+
+     // zap clock driver
+    zap(clockPID); 
     join(&status);
 
     // zap termreader
@@ -180,18 +187,22 @@ start3(void)
         join(&status);
     }
 
-    // zap termdriver
+    // zap termdriver, etc
     char filename[50];
     for(i = 0; i < USLOSS_TERM_UNITS; i++)
     {
         int ctrl = 0;
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
         USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)((long) ctrl));
+
+        // file stuff
         sprintf(filename, "term%d.in", i);
         FILE *f = fopen(filename, "a+");
         fprintf(f, "last line\n");
         fflush(f);
         fclose(f);
+
+        // actual termdriver zap
         zap(termProcTable[i][0]);
         join(&status);
     }
@@ -287,10 +298,10 @@ TermReader(char * arg)
     int unit = atoi( (char *) arg);     // Unit is passed as arg.
     int i;
     int receive; // char to receive
-    char line[MAXLINE + 1]; // line being created/read
+    char line[MAXLINE]; // line being created/read
     int next = 0; // index in line to write char
 
-    for (i = 0; i < MAXLINE + 1; i++) { 
+    for (i = 0; i < MAXLINE; i++) { 
         line[i] = '\0';
     }
 
@@ -311,11 +322,12 @@ TermReader(char * arg)
             MboxSend(lineReadMbox[unit], line, next);
 
             // reset line
-            for (i = 0; i < MAXLINE + 1; i++) {
+            for (i = 0; i < MAXLINE; i++) {
                 line[i] = '\0';
             } 
             next = 0;
         }
+
 
     }
     return 0;
@@ -325,27 +337,25 @@ static int
 TermWriter(char * arg) 
 {
     int unit = atoi( (char *) arg);     // Unit is passed as arg.
-    int i;
     int size;
     int ctrl = 0;
     int next;
     int status;
-    char line[MAXLINE + 1];
+    char line[MAXLINE];
 
     semvReal(running);
     if (debug4) 
         USLOSS_Console("TermWriter (unit %d): running\n", unit);
 
     while (!isZapped()) {
-        size = MboxReceive(lineWriteMbox[unit], line, MAXLINE + 1); // get line and size
+        size = MboxReceive(lineWriteMbox[unit], line, MAXLINE); // get line and size
 
         if (isZapped())
             break;
 
         // enable xmit interrupt and receive interrupt
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
-        if (termInt[unit] == 1) ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl); //ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
 
         // xmit the line
         next = 0;
@@ -362,19 +372,18 @@ TermWriter(char * arg)
                 ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
                 ctrl = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl);
                 ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
-                        if (termInt[unit] == 1) ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl); //
 
-                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
             }
 
             next++;
         }
 
-        // enable xmit int
+        // enable receive interrupt
         ctrl = 0;
         if (termInt[unit] == 1) 
             ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
         termInt[unit] = 0;
         int pid; 
         MboxReceive(pidMbox[unit], &pid, sizeof(int));
@@ -468,18 +477,18 @@ int termReadReal(int unit, int size, char *buffer) {
     if (unit < 0 || unit > USLOSS_TERM_UNITS - 1 || size < 0) {
         return -1;
     }
-    char line[MAXLINE + 1];
+    char line[MAXLINE];
     int ctrl = 0;
 
-    //interrupts
+    //enable term interrupts
     if (termInt[unit] == 0) {
         if (debug4)
             USLOSS_Console("termReadReal enable interrupts\n");
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
         termInt[unit] = 1;
     }
-    int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE + 1);
+    int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE);
 
     if (debug4) 
         USLOSS_Console("termReadReal (unit %d): size %d retval %d \n", unit, size, retval);
@@ -525,8 +534,7 @@ int termWriteReal(int unit, int size, char *text) {
     int pid = getpid();
     MboxSend(pidMbox[unit], &pid, sizeof(int));
 
-    int retval = MboxSend(lineWriteMbox[unit], text, size);
-    //USLOSS_Console("%s string %d size\n", text, size);
+    MboxSend(lineWriteMbox[unit], text, size);
     sempReal(ProcTable[pid % MAXPROC].blockSem);
     return size;
 }

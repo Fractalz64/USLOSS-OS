@@ -74,7 +74,8 @@ start3(void)
 
     // initialize proc table
     for (i = 0; i < MAXPROC; i++) {
-        emptyProc(i);
+        //emptyProc(i); Idk why this was here instead of initProc
+        initProc(i);
     }
 
     // sleep queue
@@ -255,6 +256,7 @@ TermDriver(char *arg)
         if (result != 0) {
             return 0;
         }
+
         // Try to receive character
         int recv = USLOSS_TERM_STAT_RECV(status);
         if (recv == USLOSS_DEV_BUSY) {
@@ -264,6 +266,7 @@ TermDriver(char *arg)
             if (debug4) 
                 USLOSS_Console("TermDriver RECV ERROR\n");
         }
+
         // Try to send character
         int xmit = USLOSS_TERM_STAT_XMIT(status);
         if (xmit == USLOSS_DEV_READY) {
@@ -327,22 +330,21 @@ TermWriter(char * arg)
     int ctrl = 0;
     int next;
     int status;
-    char line[MAXLINE];
+    char line[MAXLINE + 1];
 
     semvReal(running);
     if (debug4) 
         USLOSS_Console("TermWriter (unit %d): running\n", unit);
 
     while (!isZapped()) {
-        size = MboxReceive(lineWriteMbox[unit], line, MAXLINE); // get line and size
+        size = MboxReceive(lineWriteMbox[unit], line, MAXLINE + 1); // get line and size
 
         if (isZapped())
             break;
 
         // enable xmit interrupt and receive interrupt
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
-        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-
+        if (termInt[unit] == 1) ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl); //ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
         USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
 
         // xmit the line
@@ -356,10 +358,11 @@ TermWriter(char * arg)
                 //USLOSS_Console("%c string %d unit\n", line[next], unit);
 
                 ctrl = 0;
-                ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+                //ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
                 ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
                 ctrl = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl);
                 ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+                        if (termInt[unit] == 1) ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl); //
 
                 USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
             }
@@ -367,14 +370,16 @@ TermWriter(char * arg)
             next++;
         }
 
-        // disable xmit int
+        // enable xmit int
         ctrl = 0;
-        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        if (termInt[unit] == 1) 
+            ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
         USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
         termInt[unit] = 0;
         int pid; 
-        semvReal(ProcTable[pid % MAXPROC].blockSem);
         MboxReceive(pidMbox[unit], &pid, sizeof(int));
+        semvReal(ProcTable[pid % MAXPROC].blockSem);
+        
         
     }
 
@@ -474,15 +479,15 @@ int termReadReal(int unit, int size, char *buffer) {
         USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
         termInt[unit] = 1;
     }
-    int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE);
+    int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE + 1);
 
     if (debug4) 
         USLOSS_Console("termReadReal (unit %d): size %d retval %d \n", unit, size, retval);
-    memcpy(buffer, line, size);
 
     if (retval > size) {
         retval = size;
     }
+    memcpy(buffer, line, retval);
 
     return retval;
 }
@@ -522,9 +527,7 @@ int termWriteReal(int unit, int size, char *text) {
 
     int retval = MboxSend(lineWriteMbox[unit], text, size);
     //USLOSS_Console("%s string %d size\n", text, size);
-
     sempReal(ProcTable[pid % MAXPROC].blockSem);
-
     return size;
 }
 

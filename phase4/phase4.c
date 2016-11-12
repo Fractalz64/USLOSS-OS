@@ -12,7 +12,7 @@
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
-int debug4 = 1;
+int debug4 = 0;
 int running;
 
 static int ClockDriver(char *);
@@ -33,6 +33,7 @@ int sleepReal(int);
 int diskSizeReal(int, int*, int*, int*);
 int diskWriteReal(int, int, int, int, void *);
 int diskReadReal(int, int, int, int, void *);
+int diskReadOrWriteReal(int, int, int, int, void *, int);
 int termReadReal(int, int, char *);
 int termWriteReal(int, int, char *);
 
@@ -327,7 +328,7 @@ DiskDriver(char *arg)
                     // read/write the sectors
                     int s;
                     for (s = proc->diskFirstSec; proc->diskSectors > 0 && s < USLOSS_DISK_TRACK_SIZE; s++) {
-                        proc->diskRequest.reg1 = s; 
+                        proc->diskRequest.reg1 = (void *) ((long) s);
                         USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &proc->diskRequest);
                         result = waitDevice(USLOSS_DISK_DEV, unit, &status);
                         if (result != 0) {
@@ -881,13 +882,9 @@ void addDiskQ(diskQueue* q, procPtr p) {
         // find the right location to add
         procPtr prev = q->tail;
         procPtr next = q->head;
-        if (debug4)
-            USLOSS_Console("addDiskQ: prev = %d, next = %d\n", prev->prevDiskPtr, next->nextDiskPtr);
         while (next != NULL && next->diskTrack < p->diskTrack) {
             prev = next;
             next = next->nextDiskPtr;
-            if (debug4)
-                USLOSS_Console("addDiskQ: still %d here \n", next == q->head);
             if (next == q->head)
                 break;
         }

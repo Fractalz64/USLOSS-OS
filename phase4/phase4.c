@@ -8,6 +8,7 @@
 #include <usyscall.h>
 #include <stdlib.h> /* needed for atoi() */
 #include <stdio.h>
+#include <string.h> /* needed for memcpy() */
 
 #define ABS(a,b) (a-b > 0 ? a-b : -(a-b))
 
@@ -27,10 +28,14 @@ void diskWrite(systemArgs *);
 void diskSize(systemArgs *);
 void termRead(systemArgs *);
 void termWrite(systemArgs *);
+
 int sleepReal(int);
 int diskSizeReal(int, int*, int*, int*);
 int diskWriteReal(int, int, int, int, void *);
 int diskReadReal(int, int, int, int, void *);
+int termReadReal(int, int, char *);
+int termWriteReal(int, int, char *);
+
 void requireKernelMode(char *);
 void emptyProc(int);
 void initProc(int);
@@ -56,7 +61,7 @@ int charSendMbox[USLOSS_TERM_UNITS]; // send char
 int lineReadMbox[USLOSS_TERM_UNITS]; // read line
 int lineWriteMbox[USLOSS_TERM_UNITS]; // write line
 int pidMbox[USLOSS_TERM_UNITS]; // pid to block
-int termInt[USLOSS_TERM_UNITS]; // interupt fo rterm
+int termInt[USLOSS_TERM_UNITS]; // interupt for term (control writing)
 
 int termProcTable[USLOSS_TERM_UNITS][3]; // keep track of term procs
 
@@ -79,7 +84,8 @@ start3(void)
 
     // initialize proc table
     for (i = 0; i < MAXPROC; i++) {
-        emptyProc(i);
+        //emptyProc(i); Idk why this was here instead of initProc
+        initProc(i);
     }
 
     // sleep queue
@@ -142,8 +148,6 @@ start3(void)
     }
 
 
-    // May be other stuff to do here before going on to terminal drivers
-
     /*
      * Create terminal device drivers.
      */
@@ -174,8 +178,17 @@ start3(void)
      */
 
     status = 0;
-    zap(clockPID);  // clock driver
+
+     // zap clock driver
+    zap(clockPID); 
     join(&status);
+
+    // zap disk drivers
+    for (i = 0; i < USLOSS_DISK_UNITS; i++) {
+        semvReal(ProcTable[diskPids[i]].blockSem); 
+        zap(diskPids[i]);
+        join(&status);
+    }
 
     // zap termreader
     for (i = 0; i < USLOSS_TERM_UNITS; i++) {
@@ -191,31 +204,32 @@ start3(void)
         join(&status);
     }
 
-    // zap termdriver
+    // zap termdriver, etc
     char filename[50];
     for(i = 0; i < USLOSS_TERM_UNITS; i++)
     {
         int ctrl = 0;
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
         USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)((long) ctrl));
+
+        // file stuff
         sprintf(filename, "term%d.in", i);
         FILE *f = fopen(filename, "a+");
         fprintf(f, "last line\n");
         fflush(f);
         fclose(f);
+
+        // actual termdriver zap
         zap(termProcTable[i][0]);
         join(&status);
     }
-
-    // disk drivers
-    diskZapped = 1;
-    join(&status);
 
     // eventually, at the end:
     quit(0);
     
 }
 
+/* Clock Driver */
 static int
 ClockDriver(char *arg)
 {
@@ -245,6 +259,7 @@ ClockDriver(char *arg)
     return 0;
 }
 
+/* Disk Driver */
 static int
 DiskDriver(char *arg)
 {
@@ -266,33 +281,76 @@ DiskDriver(char *arg)
     USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 
     // Infinite loop until we are zap'd
-    while(! diskZapped) {
+    while(!isZapped()) {
         // block on sem until we get request
         sempReal(me->blockSem);
         if (debug4) {
-            USLOSS_Console("DiskDriver: unit %d unblocked, zapped = %d, queue size = %d\n", unit, diskZapped, diskQs[unit].size);
+            USLOSS_Console("DiskDriver: unit %d unblocked, zapped = %d, queue size = %d\n", unit, isZapped(), diskQs[unit].size);
         }
-        if (diskZapped) // check  if we were zapped
-            break;
+        if (isZapped()) // check  if we were zapped
+            return 0;
 
         // get request off queue
         if (diskQs[unit].size > 0) {
             procPtr proc = removeDiskQ(&diskQs[unit]);
+
             if (debug4) {
                 USLOSS_Console("DiskDriver: taking request from pid %d, track %d\n", proc->pid, proc->diskTrack);
             }
-            USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &proc->diskRequest);
 
-            // wait for result
-            result = waitDevice(USLOSS_DISK_DEV, unit, &status);
-            if (result != 0) {
-                return 0;
+            // handle tracks request
+            if (proc->diskRequest.opr == USLOSS_DISK_TRACKS) {
+                USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &proc->diskRequest);
+                result = waitDevice(USLOSS_DISK_DEV, unit, &status);
+                if (result != 0) {
+                    return 0;
+                }
             }
 
-            result = USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
-            if (debug4) {
-                USLOSS_Console("DiskDriver: finished request from pid %d, result = %d, status = %d\n", proc->pid, result, status);
+            else { // handle read/write requests
+                while (proc->diskSectors > 0) {
+                    // seek to needed track
+                    USLOSS_DeviceRequest request;
+                    request.opr = USLOSS_DISK_SEEK;
+                    request.reg1 = &proc->diskTrack;
+                    USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &request);
+                    // wait for result
+                    result = waitDevice(USLOSS_DISK_DEV, unit, &status);
+                    if (result != 0) {
+                        return 0;
+                    }
+
+                    if (debug4) {
+                        USLOSS_Console("DiskDriver: seeked to track %d, status = %d, result = %d\n", proc->diskTrack, status, result);
+                    }
+
+                    // read/write the sectors
+                    int s;
+                    for (s = proc->diskFirstSec; proc->diskSectors > 0 && s < USLOSS_DISK_TRACK_SIZE; s++) {
+                        proc->diskRequest.reg1 = s; 
+                        USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &proc->diskRequest);
+                        result = waitDevice(USLOSS_DISK_DEV, unit, &status);
+                        if (result != 0) {
+                            return 0;
+                        }
+
+                        if (debug4) {
+                            USLOSS_Console("DiskDriver: read/wrote sector %d, status = %d, result = %d, buffer = %s\n", s, status, result, proc->diskRequest.reg2);
+                        }
+
+                        proc->diskSectors--;
+                        proc->diskRequest.reg2 += USLOSS_DISK_SECTOR_SIZE;
+                    }
+
+                    // request first sector of next track
+                    proc->diskTrack++;
+                    proc->diskFirstSec = 0;
+                }
             }
+
+            if (debug4) 
+                USLOSS_Console("DiskDriver: finished request from pid %d\n", proc->pid, result, status);
+
             semvReal(proc->blockSem); // unblock caller
         }
 
@@ -302,6 +360,7 @@ DiskDriver(char *arg)
     return 0;
 }
 
+/* Terminal Driver */
 static int
 TermDriver(char *arg)
 {
@@ -319,6 +378,7 @@ TermDriver(char *arg)
         if (result != 0) {
             return 0;
         }
+
         // Try to receive character
         int recv = USLOSS_TERM_STAT_RECV(status);
         if (recv == USLOSS_DEV_BUSY) {
@@ -328,6 +388,7 @@ TermDriver(char *arg)
             if (debug4) 
                 USLOSS_Console("TermDriver RECV ERROR\n");
         }
+
         // Try to send character
         int xmit = USLOSS_TERM_STAT_XMIT(status);
         if (xmit == USLOSS_DEV_READY) {
@@ -342,16 +403,17 @@ TermDriver(char *arg)
     return 0;
 }
 
+/* Terminal Reader */
 static int 
 TermReader(char * arg) 
 {
     int unit = atoi( (char *) arg);     // Unit is passed as arg.
     int i;
     int receive; // char to receive
-    char line[MAXLINE + 1]; // line being created/read
+    char line[MAXLINE]; // line being created/read
     int next = 0; // index in line to write char
 
-    for (i = 0; i < MAXLINE + 1; i++) { 
+    for (i = 0; i < MAXLINE; i++) { 
         line[i] = '\0';
     }
 
@@ -372,21 +434,22 @@ TermReader(char * arg)
             MboxSend(lineReadMbox[unit], line, next);
 
             // reset line
-            for (i = 0; i < MAXLINE + 1; i++) {
+            for (i = 0; i < MAXLINE; i++) {
                 line[i] = '\0';
             } 
             next = 0;
         }
 
+
     }
     return 0;
 }
 
+/* Terminal Writer */
 static int 
 TermWriter(char * arg) 
 {
     int unit = atoi( (char *) arg);     // Unit is passed as arg.
-    int i;
     int size;
     int ctrl = 0;
     int next;
@@ -405,9 +468,7 @@ TermWriter(char * arg)
 
         // enable xmit interrupt and receive interrupt
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
-        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
 
         // xmit the line
         next = 0;
@@ -420,25 +481,27 @@ TermWriter(char * arg)
                 //USLOSS_Console("%c string %d unit\n", line[next], unit);
 
                 ctrl = 0;
-                ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+                //ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
                 ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, line[next]);
                 ctrl = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl);
                 ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
 
-                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+                USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
             }
 
             next++;
         }
 
-        // disable xmit int
+        // enable receive interrupt
         ctrl = 0;
-        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        if (termInt[unit] == 1) 
+            ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
         termInt[unit] = 0;
         int pid; 
-        semvReal(ProcTable[pid % MAXPROC].blockSem);
         MboxReceive(pidMbox[unit], &pid, sizeof(int));
+        semvReal(ProcTable[pid % MAXPROC].blockSem);
+        
         
     }
 
@@ -485,10 +548,28 @@ int sleepReal(int seconds) {
     return 0;
 }
 
+/* extract values from sysargs and call diskReadReal */
 void diskRead(systemArgs * args) {
     requireKernelMode("diskRead");
+
+    int sectors = (long) args->arg2;
+    int track = (long) args->arg3;
+    int first = (long) args->arg4;
+    int unit = (long) args->arg5;
+
+    int retval = diskReadReal(unit, track, first, sectors, args->arg1);
+
+    if (retval == -1) {
+        args->arg1 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) -1);
+    } else {
+        args->arg1 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) 0);
+    }
+    setUserMode();
 }
 
+/* extract values from sysargs and call diskWriteReal */
 void diskWrite(systemArgs * args) {
     requireKernelMode("diskWrite");
 
@@ -497,14 +578,45 @@ void diskWrite(systemArgs * args) {
     int first = (long) args->arg4;
     int unit = (long) args->arg5;
 
-    int retval = diskWriteReal(unit, first, track, sectors, args->arg1);
+    int retval = diskWriteReal(unit, track, first, sectors, args->arg1);
+
+    if (retval == -1) {
+        args->arg1 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) -1);
+    } else {
+        args->arg1 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) 0);
+    }
     setUserMode();
 }
 
 int diskWriteReal(int unit, int track, int first, int sectors, void *buffer) {
     requireKernelMode("diskWriteReal");
+    return diskReadOrWriteReal(unit, track, first, sectors, buffer, 1);
+}
 
-    // check args!!!
+int diskReadReal(int unit, int track, int first, int sectors, void *buffer) {
+    requireKernelMode("diskWriteReal");
+    return diskReadOrWriteReal(unit, track, first, sectors, buffer, 0);
+}
+
+/*------------------------------------------------------------------------
+    diskReadOrWriteReal: Reads or writes to the desk depending on the 
+                        value of write; write if write == 1, else read.
+    Returns: -1 if given illegal input, 0 otherwise
+ ------------------------------------------------------------------------*/
+int diskReadOrWriteReal(int unit, int track, int first, int sectors, void *buffer, int write) {
+    if (debug4)
+        USLOSS_Console("diskReadOrWriteReal: called with unit: %d, track: %d, first: %d, sectors: %d, write: %d\n", unit, track, first, sectors, write);
+
+    // check for illegal args
+    if (unit < 0 || unit > 1 || track < 0 || track > ProcTable[diskPids[unit]].diskTrack ||
+        first < 0 || first > USLOSS_DISK_TRACK_SIZE || buffer == NULL  ||
+        (first + sectors)/USLOSS_DISK_TRACK_SIZE + track > ProcTable[diskPids[unit]].diskTrack) {
+        return -1;
+    }
+
+    procPtr driver = &ProcTable[diskPids[unit]];
 
     // init/get the process
     if (ProcTable[getpid() % MAXPROC].pid == -1) {
@@ -512,11 +624,27 @@ int diskWriteReal(int unit, int track, int first, int sectors, void *buffer) {
     }
     procPtr proc = &ProcTable[getpid() % MAXPROC];
 
-    proc->diskRequest.opr = USLOSS_DISK_WRITE;
-    proc->diskRequest.reg1 = (void *) ((long) first);
-    proc->diskRequest.reg1 = buffer;
+    if (write)
+        proc->diskRequest.opr = USLOSS_DISK_WRITE;
+    else
+        proc->diskRequest.opr = USLOSS_DISK_READ;
+    proc->diskRequest.reg2 = buffer;
+    proc->diskTrack = track;
+    proc->diskFirstSec = first;
+    proc->diskSectors = sectors;
+    proc->diskBuffer = buffer;
 
-    return 0;
+    addDiskQ(&diskQs[unit], proc); // add to disk queue 
+    semvReal(driver->blockSem);  // wake up disk driver
+    sempReal(proc->blockSem); // block
+
+    int status;
+    int result = USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
+
+    if (debug4)
+        USLOSS_Console("diskReadOrWriteReal: finished, status = %d, result = %d\n", status, result);
+
+    return result;
 }
 
 /* extract values from sysargs and call diskSizeReal */
@@ -569,8 +697,6 @@ int diskSizeReal(int unit, int *sector, int *track, int *disk) {
         semvReal(driver->blockSem);  // wake up disk driver
         sempReal(proc->blockSem); // block
 
-        int status;
-        int what = USLOSS_DeviceInput(USLOSS_DISK_DEV, unit, &status);
         if (debug4)
             USLOSS_Console("diskSizeReal: number of tracks on unit %d: %d\n", unit, driver->diskTrack);
     }
@@ -595,10 +721,10 @@ void termRead(systemArgs * args) {
     if (retval == -1) {
         args->arg2 = (void *) ((long) retval);
         args->arg4 = (void *) ((long) -1);
-        return;
+    } else {
+        args->arg2 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) 0);
     }
-    args->arg2 = (void *) ((long) retval);
-    args->arg4 = (void *) ((long) 0);
     setUserMode();
 }
 
@@ -610,26 +736,26 @@ int termReadReal(int unit, int size, char *buffer) {
     if (unit < 0 || unit > USLOSS_TERM_UNITS - 1 || size < 0) {
         return -1;
     }
-    char line[MAXLINE + 1];
+    char line[MAXLINE];
     int ctrl = 0;
 
-    //interrupts
+    //enable term interrupts
     if (termInt[unit] == 0) {
         if (debug4)
             USLOSS_Console("termReadReal enable interrupts\n");
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *) ((long) ctrl));
         termInt[unit] = 1;
     }
     int retval = MboxReceive(lineReadMbox[unit], &line, MAXLINE);
 
     if (debug4) 
         USLOSS_Console("termReadReal (unit %d): size %d retval %d \n", unit, size, retval);
-    memcpy(buffer, line, size);
 
     if (retval > size) {
         retval = size;
     }
+    memcpy(buffer, line, retval);
 
     return retval;
 }
@@ -648,10 +774,10 @@ void termWrite(systemArgs * args) {
     if (retval == -1) {
         args->arg2 = (void *) ((long) retval);
         args->arg4 = (void *) ((long) -1);
-        return;
+    } else {
+        args->arg2 = (void *) ((long) retval);
+        args->arg4 = (void *) ((long) 0);
     }
-    args->arg2 = (void *) ((long) retval);
-    args->arg4 = (void *) ((long) 0);
     setUserMode(); 
 }
 
@@ -667,11 +793,8 @@ int termWriteReal(int unit, int size, char *text) {
     int pid = getpid();
     MboxSend(pidMbox[unit], &pid, sizeof(int));
 
-    int retval = MboxSend(lineWriteMbox[unit], text, size);
-    //USLOSS_Console("%s string %d size\n", text, size);
-
+    MboxSend(lineWriteMbox[unit], text, size);
     sempReal(ProcTable[pid % MAXPROC].blockSem);
-
     return size;
 }
 
@@ -758,14 +881,22 @@ void addDiskQ(diskQueue* q, procPtr p) {
         // find the right location to add
         procPtr prev = q->tail;
         procPtr next = q->head;
-        while (next->diskTrack < p->diskTrack) {
+        if (debug4)
+            USLOSS_Console("addDiskQ: prev = %d, next = %d\n", prev->prevDiskPtr, next->nextDiskPtr);
+        while (next != NULL && next->diskTrack < p->diskTrack) {
             prev = next;
             next = next->nextDiskPtr;
+            if (debug4)
+                USLOSS_Console("addDiskQ: still %d here \n", next == q->head);
             if (next == q->head)
                 break;
         }
+        if (debug4)
+            USLOSS_Console("addDiskQ: found place, prev = %d\n", prev->diskTrack);
         prev->nextDiskPtr = p;
         p->prevDiskPtr = prev;
+        if (next == NULL)
+            next = q->head;
         p->nextDiskPtr = next;
         next->prevDiskPtr = p;
         if (p->diskTrack < q->head->diskTrack)
@@ -793,7 +924,7 @@ procPtr removeDiskQ(diskQueue* q) {
     procPtr temp = q->curr;
 
     if (q->size == 1) { // remove only node
-        q->head = q->tail = NULL;
+        q->head = q->tail = q->curr = NULL;
     }
 
     else if (q->curr == q->head) { // remove head
@@ -816,10 +947,11 @@ procPtr removeDiskQ(diskQueue* q) {
         q->curr = q->curr->nextDiskPtr;
     }
 
-    if (debug4)
-        USLOSS_Console("removeDiskQ: removed curr pid = %d, curr track = %d, size = %d\n", q->size, temp->pid, temp->diskTrack);
-
     q->size--;
+
+    if (debug4)
+        USLOSS_Console("removeDiskQ: done, size = %d, curr pid = %d, curr track = %d\n", q->size, temp->pid, temp->diskTrack);
+
     return temp;
 } 
 

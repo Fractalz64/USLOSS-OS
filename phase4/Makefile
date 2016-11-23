@@ -1,4 +1,3 @@
-
 TARGET = libphase4.a
 ASSIGNMENT = 452phase4
 CC = gcc
@@ -12,7 +11,7 @@ PHASE3LIB = patrickphase3
 #PHASE1LIB = patrickphase1debug
 #PHASE2LIB = patrickphase2debug
 
-HDRS = libuser.h libuser4.h phase1.h phase2.h phase3.h provided_prototypes.h p4structs.h
+HDRS = libuser.h libuser4.h phase1.h phase2.h phase3.h phase4.h providedPrototypes.h p4structs.h
 
 INCLUDE = ./usloss/include
 
@@ -54,4 +53,3 @@ phase3.o:	sems.h
 
 submit: $(CSRCS) $(HDRS) Makefile
 	tar cvzf phase4.tgz $(CSRCS) $(HDRS) Makefile
-

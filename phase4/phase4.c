@@ -43,6 +43,7 @@ void initProc(int);
 void setUserMode();
 void initDiskQueue(diskQueue*);
 void addDiskQ(diskQueue*, procPtr);
+procPtr peekDiskQ(diskQueue*);
 procPtr removeDiskQ(diskQueue*);
 void initHeap(heap *);
 void heapAdd(heap *, procPtr);
@@ -293,7 +294,8 @@ DiskDriver(char *arg)
 
         // get request off queue
         if (diskQs[unit].size > 0) {
-            procPtr proc = removeDiskQ(&diskQs[unit]);
+            procPtr proc = peekDiskQ(&diskQs[unit]);
+            int track = proc->diskTrack;
 
             if (debug4) {
                 USLOSS_Console("DiskDriver: taking request from pid %d, track %d\n", proc->pid, proc->diskTrack);
@@ -313,7 +315,7 @@ DiskDriver(char *arg)
                     // seek to needed track
                     USLOSS_DeviceRequest request;
                     request.opr = USLOSS_DISK_SEEK;
-                    request.reg1 = &proc->diskTrack;
+                    request.reg1 = &track;
                     USLOSS_DeviceOutput(USLOSS_DISK_DEV, unit, &request);
                     // wait for result
                     result = waitDevice(USLOSS_DISK_DEV, unit, &status);
@@ -322,7 +324,7 @@ DiskDriver(char *arg)
                     }
 
                     if (debug4) {
-                        USLOSS_Console("DiskDriver: seeked to track %d, status = %d, result = %d\n", proc->diskTrack, status, result);
+                        USLOSS_Console("DiskDriver: seeked to track %d, status = %d, result = %d\n", track, status, result);
                     }
 
                     // read/write the sectors
@@ -344,7 +346,7 @@ DiskDriver(char *arg)
                     }
 
                     // request first sector of next track
-                    proc->diskTrack++;
+                    track++;
                     proc->diskFirstSec = 0;
                 }
             }
@@ -352,6 +354,7 @@ DiskDriver(char *arg)
             if (debug4) 
                 USLOSS_Console("DiskDriver: finished request from pid %d\n", proc->pid, result, status);
 
+            removeDiskQ(&diskQs[unit]); // remove proc from queue
             semvReal(proc->blockSem); // unblock caller
         }
 
@@ -882,7 +885,7 @@ void addDiskQ(diskQueue* q, procPtr p) {
         // find the right location to add
         procPtr prev = q->tail;
         procPtr next = q->head;
-        while (next != NULL && next->diskTrack < p->diskTrack) {
+        while (next != NULL && next->diskTrack <= p->diskTrack) {
             prev = next;
             next = next->nextDiskPtr;
             if (next == q->head)
@@ -898,13 +901,22 @@ void addDiskQ(diskQueue* q, procPtr p) {
         next->prevDiskPtr = p;
         if (p->diskTrack < q->head->diskTrack)
             q->head = p; // update head
-        if (p->diskTrack > q->tail->diskTrack)
+        if (p->diskTrack >= q->tail->diskTrack)
             q->tail = p; // update tail
     }
     q->size++;
     if (debug4)
         USLOSS_Console("addDiskQ: add complete, size = %d\n", q->size);
 } 
+
+/* Returns the next proc on the disk queue */
+procPtr peekDiskQ(diskQueue* q) {
+    if (q->curr == NULL) {
+        q->curr = q->head;
+    }
+
+    return q->curr;
+}
 
 /* Returns and removes the next proc on the disk queue */
 procPtr removeDiskQ(diskQueue* q) {
@@ -935,7 +947,7 @@ procPtr removeDiskQ(diskQueue* q) {
         q->tail = q->tail->prevDiskPtr;
         q->tail->nextDiskPtr = q->head;
         q->head->prevDiskPtr = q->tail;
-        q->curr = q->tail;
+        q->curr = q->head;
     }
 
     else { // remove other

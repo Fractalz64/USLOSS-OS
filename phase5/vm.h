@@ -33,6 +33,7 @@ typedef struct Process {
     int  numPages;   // Size of the page table.
     PTE  *pageTable; // The page table for the process.
     // Add more stuff here */
+    int  pid;
 } Process;
 
 /*
@@ -45,5 +46,12 @@ typedef struct FaultMsg {
     int  replyMbox;  // Mailbox to send reply.
     // Add more stuff here.
 } FaultMsg;
+
+/* Information about each Frame */
+typedef struct Frame {
+    int pid;        // pid of process using the frame, -1 if none
+    int status;     // whether it is free/in use
+    // other stuff
+} Frame;
 
 #define CheckMode() assert(USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE)

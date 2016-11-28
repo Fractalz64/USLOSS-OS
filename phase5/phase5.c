@@ -360,7 +360,7 @@ vmDestroyReal(void)
     USLOSS_Console("blocks: %d\n", vmStats.diskBlocks);
     /* and so on... */
 
-    vmInited = 0;
+    vmRegion = NULL;
 } /* vmDestroyReal */
 
 /*

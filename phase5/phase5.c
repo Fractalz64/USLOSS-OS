@@ -159,6 +159,7 @@ vmDestroy(systemArgs *args)
 {
    CheckMode();
    vmDestroyReal();
+   setUserMode();
 } /* vmDestroy */
 
 
@@ -182,6 +183,7 @@ vmDestroy(systemArgs *args)
 void *
 vmInitReal(int mappings, int pages, int frames, int pagers)
 {
+    CheckMode();    
     int status;
     int dummy;
 
@@ -195,7 +197,6 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
         return (void *) ((long) -1);
     }
 
-    CheckMode();
     status = USLOSS_MmuInit(mappings, pages, frames);
     if (status != USLOSS_MMU_OK) {
         USLOSS_Console("vmInitReal: couldn't init MMU, status %d\n", status);
@@ -221,7 +222,7 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
         processes[i].pid = -1; 
         processes[i].numPages = pages; 
         // THIS GOES IN p1_fork() !!!!!
-        processes[i].pageTable = malloc( pages * sizeof(PTE)); 
+        processes[i].pageTable = NULL;
 
         // initialize each page table entry
         int j;
@@ -234,13 +235,13 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
         // initialize the fault structs
         faults[i].pid = -1;
         faults[i].addr = NULL;
-        Mbox_Create(0, 0, &faults[i].replyMbox); // assuming this is just used to block/unblock the process.... probably wrong
+        faults[i].replyMbox = MboxCreate(0, 0); // assuming this is just used to block/unblock the process.... probably wrong
     }
 
    /* 
     * Create the fault mailbox.
     */
-    Mbox_Create(MAXPROC, sizeof(FaultMsg), &faultMBox);
+    faultMBox = MboxCreate(MAXPROC, sizeof(FaultMsg));
 
    /*
     * Fork the pagers.
@@ -343,13 +344,12 @@ vmDestroyReal(void)
         zap(pagerPids[i]);
     }
 
-    // free page tables and release fault mailboxes
+    // release fault mailboxes
     for (i = 0; i < MAXPROC; i++) {
-        free(&processes[i].pageTable); 
-        Mbox_Release(faults[i].replyMbox);
+        MboxRelease(faults[i].replyMbox);
     }
 
-    Mbox_Release(faultMBox);
+    MboxRelease(faultMBox);
 
    /* 
     * Print vm statistics.
@@ -402,10 +402,10 @@ FaultHandler(int  type /* USLOSS_MMU_INT */,
    fault->addr = processes[pid % MAXPROC].pageTable + offset;
 
    // send to pagers
-   Mbox_Send(faultMBox, fault, sizeof(FaultMsg));
+   MboxSend(faultMBox, fault, sizeof(FaultMsg));
 
    // block
-   Mbox_Send(fault->replyMbox, 0, 0);
+   MboxSend(fault->replyMbox, 0, 0);
 
 } /* FaultHandler */
 
@@ -430,7 +430,9 @@ Pager(char *buf)
     while(1) {
         /* Wait for fault to occur (receive from mailbox) */
         FaultMsg *fault = NULL;
-        Mbox_Receive(faultMBox, fault, sizeof(FaultMsg));
+        MboxReceive(faultMBox, fault, sizeof(FaultMsg));
+
+        Process *proc = &processes[fault->pid % MAXPROC];
 
         /* Look for free frame */
         int i;
@@ -448,8 +450,11 @@ Pager(char *buf)
         /* Load page into frame from disk, if necessary */
 
 
+        // set frame in PTE
+        proc->pageTable->frame = i;
+
         /* Unblock waiting (faulting) process */
-        Mbox_Send(fault->replyMbox, 0, 0);
+        MboxSend(fault->replyMbox, 0, 0);
     }
     return 0;
 } /* Pager */

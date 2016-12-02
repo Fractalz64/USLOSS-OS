@@ -1,11 +1,3 @@
-/*
- * skeleton.c
- *
- * This is a skeleton for phase5 of the programming assignment. It
- * doesn't do much -- it is just intended to get you started.
- */
-
-
 #include <assert.h>
 #include <phase1.h>
 #include <phase2.h>
@@ -37,8 +29,8 @@ static int Pager(char *);
 void setUserMode();
 
 /* Globals */
-static Process processes[MAXPROC];
-
+int debug5 = 1;
+Process processes[MAXPROC];
 FaultMsg faults[MAXPROC]; /* Note that a process can have only
                            * one fault at a time, so we can
                            * allocate the messages statically
@@ -187,6 +179,9 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     int status;
     int dummy;
 
+    if (debug5) 
+        USLOSS_Console("vmInitReal: started \n");
+    
     // check if VM has already been initialized
     if (vmRegion > 0) {
         return (void *) ((long) -2);
@@ -207,6 +202,8 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     /* 
      * Initialize frame table 
      */
+    if (debug5) 
+        USLOSS_Console("vmInitReal: initializing frame table... \n");
     frameTable = malloc(frames * sizeof(Frame));
     int i;
     for (i = 0; i < frames; i++) {
@@ -218,19 +215,12 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
    /*
     * Initialize page tables.
     */
+    if (debug5) 
+        USLOSS_Console("vmInitReal: initializing page table... \n");
     for (i = 0; i < MAXPROC; i++) {
         processes[i].pid = -1; 
         processes[i].numPages = pages; 
-        // THIS GOES IN p1_fork() !!!!!
         processes[i].pageTable = NULL;
-
-        // initialize each page table entry
-        int j;
-        for (j = 0; j < pages; j++) {
-            processes[i].pageTable->state = UNUSED;
-            processes[i].pageTable->frame = -1;
-            processes[i].pageTable->diskBlock = -1;
-        }   
 
         // initialize the fault structs
         faults[i].pid = -1;
@@ -246,6 +236,8 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
    /*
     * Fork the pagers.
     */
+    if (debug5) 
+        USLOSS_Console("vmInitReal: forking pagers... \n");
     // fill pagerPids with -1s
     memset(pagerPids, -1, sizeof(pagerPids));
 
@@ -260,6 +252,8 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     memset((char *) &vmStats, 0, sizeof(VmStats));
 
     // get diskBlocks = tracks on disk
+    if (debug5) 
+        USLOSS_Console("vmInitReal: getting disk size... \n");
     int diskBlocks;
     diskSizeReal(1, &dummy, &dummy, &diskBlocks);
 
@@ -270,6 +264,8 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     vmStats.freeDiskBlocks = diskBlocks;
 
     vmRegion = USLOSS_MmuRegion(&dummy);
+    if (debug5) 
+        USLOSS_Console("vmInitReal: returning vmRegion = %d \n", vmRegion);
     return vmRegion;
 } /* vmInitReal */
 
@@ -384,6 +380,9 @@ static void
 FaultHandler(int  type /* USLOSS_MMU_INT */,
              void *arg  /* Offset within VM region */)
 {
+    if (debug5) 
+        USLOSS_Console("FaultHandler: called for process %d \n", getpid());
+
    int cause;
 
    int offset = (int) (long) arg;
@@ -404,6 +403,8 @@ FaultHandler(int  type /* USLOSS_MMU_INT */,
    // send to pagers
    MboxSend(faultMBox, fault, sizeof(FaultMsg));
 
+    if (debug5) 
+        USLOSS_Console("FaultHandler: sent fault to pagers, blocking... \n", getpid());
    // block
    MboxSend(fault->replyMbox, 0, 0);
 
@@ -430,15 +431,19 @@ Pager(char *buf)
     while(1) {
         /* Wait for fault to occur (receive from mailbox) */
         FaultMsg *fault = NULL;
-        MboxReceive(faultMBox, fault, sizeof(FaultMsg));
-
+        MboxReceive(faultMBox, fault, sizeof(FaultMsg)); 
         Process *proc = &processes[fault->pid % MAXPROC];
+        if (debug5) 
+            USLOSS_Console("Pager: got fault from process %d \n", proc->pid);
 
         /* Look for free frame */
         int i;
         for (i = 0; i < numFrames; i++) {
-            if (frameTable[i].status == UNUSED)
+            if (frameTable[i].status == UNUSED) {
+                if (debug5) 
+                    USLOSS_Console("Pager: found frame %d free \n", i);
                 break;
+            }
         }
 
         /* If there isn't one then use clock algorithm to
@@ -453,6 +458,8 @@ Pager(char *buf)
         // set frame in PTE
         proc->pageTable->frame = i;
 
+        if (debug5) 
+            USLOSS_Console("Pager: set page to frame %d, unblocking process %d \n", i, proc->pid);
         /* Unblock waiting (faulting) process */
         MboxSend(fault->replyMbox, 0, 0);
     }

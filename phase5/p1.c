@@ -5,7 +5,7 @@
 #include <mmu.h>
 #include <phase5.h>
 
-#define DEBUG 0
+#define DEBUG 1
 #define TAG 0
 extern int debugflag;
 
@@ -13,15 +13,34 @@ extern Process processes[MAXPROC];
 extern void *vmRegion;
 extern VmStats vmStats;
 
+
+/* Fills the given PTE with default values */
+void clearPage(PTE *page) {
+    page->state = UNUSED;
+    page->frame = -1;
+    page->diskBlock = -1;
+}
+
 void
 p1_fork(int pid)
 {
-    if (DEBUG && debugflag)
+    if (DEBUG)
         USLOSS_Console("p1_fork() called: pid = %d\n", pid);
 
     if (vmRegion > 0) {
+        Process *proc = &processes[pid % MAXPROC];
+        if (DEBUG)
+            USLOSS_Console("p1_fork(): creating page table with %d pages\n", proc->numPages);
     	// create the process's page table
-    	processes[pid % MAXPROC].pageTable = malloc( processes[pid % MAXPROC].numPages * sizeof(PTE)); 
+    	proc->pageTable = malloc( proc->numPages * sizeof(PTE));
+        if (DEBUG)
+            USLOSS_Console("p1_fork(): malloced page table, clearing pages... \n"); 
+        int i;
+        for (i = 0; i < proc->numPages; i++) {
+            clearPage(&proc->pageTable[i]);
+        }
+        if (DEBUG)
+            USLOSS_Console("p1_fork(): done \n"); 
     }
 
 } /* p1_fork */
@@ -71,12 +90,11 @@ p1_quit(int pid)
     	Process *proc = &processes[pid % MAXPROC];
     	int i;
     	for (i = 0; i < proc->numPages; i++) {
-    		proc->pageTable[i].state = UNUSED;
-    		proc->pageTable[i].frame = -1;
-    		proc->pageTable[i].diskBlock = -1;
+            clearPage(&proc->pageTable[i]);
     	}
 
     	// destroy the page table
     	free(proc->pageTable); 
     }
 } /* p1_quit */
+

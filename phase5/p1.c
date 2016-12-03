@@ -56,27 +56,37 @@ p1_switch(int old, int new)
     if (DEBUG && debugflag)
         USLOSS_Console("p1_switch() called: old = %d, new = %d\n", old, new);
 
-    if (vmRegion > 0) {
-    	vmStats.switches++;
+    if (vmRegion == NULL)
+    	return;
 
-    	Process *oldProc = &processes[old % MAXPROC];
-    	Process *newProc = &processes[new % MAXPROC];
+	vmStats.switches++;
+	int i;
 
-    	// unload old process's mappings
-    	int i;
-    	for (i = 0; i < oldProc->numPages; i++) {
-    		if (oldProc->pageTable[i].frame > 0) { // there is a valid mapping
-    			USLOSS_MmuUnmap(TAG, i);
-    		}
-    	}
+	// unload old process's mappings
+	if (old > 0) {
+		Process *oldProc = &processes[old % MAXPROC];
+		if (oldProc->pageTable != NULL) {
+			for (i = 0; i < oldProc->numPages; i++) {
+				if (oldProc->pageTable[i].frame > 0)  // there is a valid mapping
+					USLOSS_MmuUnmap(TAG, i);
+			}
+		}
+	}
+	if (DEBUG && debugflag)
+        USLOSS_Console("p1_switch(): unloaded old pages \n");
 
-		for (i = 0; i < newProc->numPages; i++) {
-    		if (newProc->pageTable[i].frame > 0) { // there is a valid mapping
-    			USLOSS_MmuMap(TAG, i, newProc->pageTable[i].frame, USLOSS_MMU_PROT_RW);
-   			}
-    	}    	
-    }
-
+	// map new process's pages
+	if (new > 0) {
+		Process *newProc = &processes[new % MAXPROC];
+		if (newProc->pageTable != NULL) {
+			for (i = 0; i < newProc->numPages; i++) {
+				if (newProc->pageTable[i].frame > 0)  // there is a valid mapping
+					USLOSS_MmuMap(TAG, i, newProc->pageTable[i].frame, USLOSS_MMU_PROT_RW);
+			}
+		}    	
+	}
+	if (DEBUG && debugflag)
+        USLOSS_Console("p1_switch(): loaded new pages \n");
 } /* p1_switch */
 
 void
@@ -93,8 +103,14 @@ p1_quit(int pid)
             clearPage(&proc->pageTable[i]);
     	}
 
+    	if (DEBUG && debugflag)
+        	USLOSS_Console("p1_quit(): cleared pages \n");
+
     	// destroy the page table
     	free(proc->pageTable); 
+
+    	if (DEBUG && debugflag)
+        	USLOSS_Console("p1_quit(): freed page table \n");
     }
 } /* p1_quit */
 

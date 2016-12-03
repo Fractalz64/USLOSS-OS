@@ -40,7 +40,7 @@ Frame *frameTable;
 int numFrames;
 int faultMBox; // faults waiting for pagers
 int pagerPids[MAXPAGERS]; // pids of the pagers
-void *vmRegion; // address of the beginning of the virtual memory region
+void *vmRegion = NULL; // address of the beginning of the virtual memory region
 
 
 
@@ -77,8 +77,6 @@ start4(char *arg)
     /* user-process access to VM functions */
     systemCallVec[SYS_VMINIT]    = vmInit;
     systemCallVec[SYS_VMDESTROY] = vmDestroy;
-
-    vmRegion = NULL;
 
     result = Spawn("Start5", start5, NULL, 8*USLOSS_MIN_STACK, 2, &pid);
     if (result != 0) {
@@ -401,10 +399,12 @@ FaultHandler(int  type /* USLOSS_MMU_INT */,
    fault->addr = processes[pid % MAXPROC].pageTable + offset;
 
    // send to pagers
+    if (debug5) 
+        USLOSS_Console("FaultHandler: created fault message for proc %d, address %d, sending to pagers... \n", fault->pid, fault->addr);
    MboxSend(faultMBox, fault, sizeof(FaultMsg));
 
     if (debug5) 
-        USLOSS_Console("FaultHandler: sent fault to pagers, blocking... \n", getpid());
+        USLOSS_Console("FaultHandler: sent fault to pagers, blocking... \n");
    // block
    MboxSend(fault->replyMbox, 0, 0);
 
@@ -432,6 +432,8 @@ Pager(char *buf)
         /* Wait for fault to occur (receive from mailbox) */
         FaultMsg *fault = NULL;
         MboxReceive(faultMBox, fault, sizeof(FaultMsg)); 
+        if (debug5) 
+            USLOSS_Console("Pager: got fault from process %d, address %d \n", fault->pid, fault->addr);
         Process *proc = &processes[fault->pid % MAXPROC];
         if (debug5) 
             USLOSS_Console("Pager: got fault from process %d \n", proc->pid);

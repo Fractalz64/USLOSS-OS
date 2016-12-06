@@ -29,7 +29,7 @@ static int Pager(char *);
 void setUserMode();
 
 /* Globals */
-int debug5 = 1;
+int debug5 = 0;
 Process processes[MAXPROC];
 FaultMsg faults[MAXPROC]; /* Note that a process can have only
                            * one fault at a time, so we can
@@ -149,7 +149,7 @@ vmDestroy(systemArgs *args)
 {
    CheckMode();
    vmDestroyReal();
-   setUserMode();
+   //setUserMode();
 } /* vmDestroy */
 
 
@@ -229,7 +229,7 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
    /* 
     * Create the fault mailbox.
     */
-    faultMBox = MboxCreate(MAXPROC, sizeof(FaultMsg));
+    faultMBox = MboxCreate(pagers, sizeof(FaultMsg));
 
    /*
     * Fork the pagers.
@@ -257,11 +257,13 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
 
     vmStats.pages = pages;
     vmStats.frames = frames;
-    vmStats.diskBlocks = diskBlocks; 
+    vmStats.diskBlocks = 2*diskBlocks; 
     vmStats.freeFrames = frames;
-    vmStats.freeDiskBlocks = diskBlocks;
+    vmStats.freeDiskBlocks = 2*diskBlocks;
+    vmStats.new = 1;
 
     vmRegion = USLOSS_MmuRegion(&dummy);
+    memset((char *)vmRegion, 0, dummy*USLOSS_MmuPageSize());
     if (debug5) 
         USLOSS_Console("vmInitReal: returning vmRegion = %d \n", vmRegion);
     return vmRegion;
@@ -328,14 +330,22 @@ vmDestroyReal(void)
     if (!vmRegion)
         return;
 
+    if (debug5) 
+        USLOSS_Console("vmDestroyReal: called \n");
+
    /*
     * Kill the pagers here.
     */
-    int i;
+    int i, status;
+    FaultMsg dummy;
     for (i = 0; i < MAXPAGERS; i++) {
         if (pagerPids[i] == -1)
             break;
+        if (debug5) 
+            USLOSS_Console("vmDestroyReal: zapping pager %d, pid %d \n", i, pagerPids[i]);
+        MboxSend(faultMBox, &dummy, sizeof(FaultMsg)); // wake up pager
         zap(pagerPids[i]);
+        join(&status);
     }
 
     // release fault mailboxes
@@ -345,13 +355,13 @@ vmDestroyReal(void)
 
     MboxRelease(faultMBox);
 
+    if (debug5) 
+        USLOSS_Console("vmDestroyReal: released fault mailboxes \n");
+
    /* 
     * Print vm statistics.
     */
-    USLOSS_Console("vmStats:\n");
-    USLOSS_Console("pages: %d\n", vmStats.pages);
-    USLOSS_Console("frames: %d\n", vmStats.frames);
-    USLOSS_Console("blocks: %d\n", vmStats.diskBlocks);
+    PrintStats();
     /* and so on... */
 
     vmRegion = NULL;
@@ -397,6 +407,7 @@ FaultHandler(int  type /* USLOSS_MMU_INT */,
    FaultMsg *fault = &faults[pid % MAXPROC];
    fault->pid = pid;
    fault->addr = processes[pid % MAXPROC].pageTable + offset;
+   fault->pageNum = offset/USLOSS_MmuPageSize();
 
    // send to pagers
     if (debug5) 
@@ -428,15 +439,15 @@ FaultHandler(int  type /* USLOSS_MMU_INT */,
 static int
 Pager(char *buf)
 {
-    while(1) {
+    while(!isZapped()) {
         /* Wait for fault to occur (receive from mailbox) */
-        FaultMsg *fault = NULL;
-        MboxReceive(faultMBox, fault, sizeof(FaultMsg)); 
+        FaultMsg fault;
+        MboxReceive(faultMBox, &fault, sizeof(FaultMsg));
+        if (isZapped())
+            break; 
         if (debug5) 
-            USLOSS_Console("Pager: got fault from process %d, address %d \n", fault->pid, fault->addr);
-        Process *proc = &processes[fault->pid % MAXPROC];
-        if (debug5) 
-            USLOSS_Console("Pager: got fault from process %d \n", proc->pid);
+            USLOSS_Console("Pager: got fault from process %d, address %d, page %d\n", fault.pid, fault.addr, fault.pageNum);
+        Process *proc = &processes[fault.pid % MAXPROC];
 
         /* Look for free frame */
         int i;
@@ -458,12 +469,12 @@ Pager(char *buf)
 
 
         // set frame in PTE
-        proc->pageTable->frame = i;
+        proc->pageTable[fault.pageNum].frame = i;
 
         if (debug5) 
-            USLOSS_Console("Pager: set page to frame %d, unblocking process %d \n", i, proc->pid);
+            USLOSS_Console("Pager: set page %d to frame %d, unblocking process %d \n", fault.pageNum, i, proc->pid);
         /* Unblock waiting (faulting) process */
-        MboxSend(fault->replyMbox, 0, 0);
+        MboxReceive(fault.replyMbox, 0, 0);
     }
     return 0;
 } /* Pager */
@@ -479,3 +490,4 @@ void setUserMode()
 {
     USLOSS_PsrSet( USLOSS_PsrGet() & ~USLOSS_PSR_CURRENT_MODE );
 }
+

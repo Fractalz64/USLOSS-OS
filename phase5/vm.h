@@ -44,6 +44,7 @@ typedef struct FaultMsg {
     int  pid;        // Process with the problem.
     void *addr;      // Address that caused the fault.
     int  replyMbox;  // Mailbox to send reply.
+    int pageNum;     // the page the fault occurred on
     // Add more stuff here.
 } FaultMsg;
 

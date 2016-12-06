@@ -29,6 +29,7 @@ p1_fork(int pid)
 
     if (vmRegion > 0) {
         Process *proc = &processes[pid % MAXPROC];
+        proc->pid = pid;
         if (DEBUG)
             USLOSS_Console("p1_fork(): creating page table with %d pages\n", proc->numPages);
     	// create the process's page table
@@ -53,7 +54,7 @@ p1_fork(int pid)
 void
 p1_switch(int old, int new)
 {
-    if (DEBUG && debugflag)
+    if (DEBUG)
         USLOSS_Console("p1_switch() called: old = %d, new = %d\n", old, new);
 
     if (vmRegion == NULL)
@@ -67,12 +68,13 @@ p1_switch(int old, int new)
 		Process *oldProc = &processes[old % MAXPROC];
 		if (oldProc->pageTable != NULL) {
 			for (i = 0; i < oldProc->numPages; i++) {
-				if (oldProc->pageTable[i].frame > 0)  // there is a valid mapping
+				if (oldProc->pageTable[i].frame >= 0) { // there is a valid mapping
 					USLOSS_MmuUnmap(TAG, i);
+                }
 			}
 		}
 	}
-	if (DEBUG && debugflag)
+	if (DEBUG)
         USLOSS_Console("p1_switch(): unloaded old pages \n");
 
 	// map new process's pages
@@ -80,24 +82,30 @@ p1_switch(int old, int new)
 		Process *newProc = &processes[new % MAXPROC];
 		if (newProc->pageTable != NULL) {
 			for (i = 0; i < newProc->numPages; i++) {
-				if (newProc->pageTable[i].frame > 0)  // there is a valid mapping
+				if (newProc->pageTable[i].frame >= 0) { // there is a valid mapping
+                    if (DEBUG)
+                        USLOSS_Console("p1_switch(): mapping page %d to frame %d for proc %d... \n", i, newProc->pageTable[i].frame, new);
 					USLOSS_MmuMap(TAG, i, newProc->pageTable[i].frame, USLOSS_MMU_PROT_RW);
+                    if (DEBUG)
+                        USLOSS_Console("p1_switch(): mapped page %d to frame %d for proc %d \n", i, newProc->pageTable[i].frame, new);
+                }
 			}
 		}    	
 	}
-	if (DEBUG && debugflag)
-        USLOSS_Console("p1_switch(): loaded new pages \n");
+
 } /* p1_switch */
 
 void
 p1_quit(int pid)
 {
-    if (DEBUG && debugflag)
+    if (DEBUG)
         USLOSS_Console("p1_quit() called: pid = %d\n", pid);
 
     if (vmRegion > 0) {
     	// clear the page table
     	Process *proc = &processes[pid % MAXPROC];
+        if (proc->pageTable == NULL) 
+            return;
     	int i;
     	for (i = 0; i < proc->numPages; i++) {
             clearPage(&proc->pageTable[i]);
@@ -109,7 +117,7 @@ p1_quit(int pid)
     	// destroy the page table
     	free(proc->pageTable); 
 
-    	if (DEBUG && debugflag)
+    	if (DEBUG)
         	USLOSS_Console("p1_quit(): freed page table \n");
     }
 } /* p1_quit */

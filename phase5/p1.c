@@ -5,10 +5,8 @@
 #include <mmu.h>
 #include <phase5.h>
 
-#define DEBUG 1
 #define TAG 0
-extern int debugflag;
-
+extern int debug5;
 extern Process processes[MAXPROC];
 extern void *vmRegion;
 extern VmStats vmStats;
@@ -21,26 +19,32 @@ void clearPage(PTE *page) {
     page->diskBlock = -1;
 }
 
+/* Fills the given Frame with default values */
+void clearFrame(Frame *frame) {
+    frame->state = UNUSED;
+    frame->pid = -1;
+}
+
 void
 p1_fork(int pid)
 {
-    if (DEBUG)
+    if (debug5)
         USLOSS_Console("p1_fork() called: pid = %d\n", pid);
 
     if (vmRegion > 0) {
         Process *proc = &processes[pid % MAXPROC];
         proc->pid = pid;
-        if (DEBUG)
+        if (debug5)
             USLOSS_Console("p1_fork(): creating page table with %d pages\n", proc->numPages);
     	// create the process's page table
     	proc->pageTable = malloc( proc->numPages * sizeof(PTE));
-        if (DEBUG)
+        if (debug5)
             USLOSS_Console("p1_fork(): malloced page table, clearing pages... \n"); 
         int i;
         for (i = 0; i < proc->numPages; i++) {
             clearPage(&proc->pageTable[i]);
         }
-        if (DEBUG)
+        if (debug5)
             USLOSS_Console("p1_fork(): done \n"); 
     }
 
@@ -54,7 +58,7 @@ p1_fork(int pid)
 void
 p1_switch(int old, int new)
 {
-    if (DEBUG)
+    if (debug5)
         USLOSS_Console("p1_switch() called: old = %d, new = %d\n", old, new);
 
     if (vmRegion == NULL)
@@ -68,13 +72,14 @@ p1_switch(int old, int new)
 		Process *oldProc = &processes[old % MAXPROC];
 		if (oldProc->pageTable != NULL) {
 			for (i = 0; i < oldProc->numPages; i++) {
-				if (oldProc->pageTable[i].frame >= 0) { // there is a valid mapping
+				if (oldProc->pageTable[i].state == ACTIVE) { // there is a valid mapping
+					//clearFrame(&oldProc->pageTable[i].frame);
 					USLOSS_MmuUnmap(TAG, i);
                 }
 			}
 		}
 	}
-	if (DEBUG)
+	if (debug5)
         USLOSS_Console("p1_switch(): unloaded old pages \n");
 
 	// map new process's pages
@@ -82,11 +87,9 @@ p1_switch(int old, int new)
 		Process *newProc = &processes[new % MAXPROC];
 		if (newProc->pageTable != NULL) {
 			for (i = 0; i < newProc->numPages; i++) {
-				if (newProc->pageTable[i].frame >= 0) { // there is a valid mapping
-                    if (DEBUG)
-                        USLOSS_Console("p1_switch(): mapping page %d to frame %d for proc %d... \n", i, newProc->pageTable[i].frame, new);
+				if (newProc->pageTable[i].state == ACTIVE) { // there is a valid mapping
 					USLOSS_MmuMap(TAG, i, newProc->pageTable[i].frame, USLOSS_MMU_PROT_RW);
-                    if (DEBUG)
+                    if (debug5)
                         USLOSS_Console("p1_switch(): mapped page %d to frame %d for proc %d \n", i, newProc->pageTable[i].frame, new);
                 }
 			}
@@ -98,7 +101,7 @@ p1_switch(int old, int new)
 void
 p1_quit(int pid)
 {
-    if (DEBUG)
+    if (debug5)
         USLOSS_Console("p1_quit() called: pid = %d\n", pid);
 
     if (vmRegion > 0) {
@@ -111,13 +114,13 @@ p1_quit(int pid)
             clearPage(&proc->pageTable[i]);
     	}
 
-    	if (DEBUG && debugflag)
+    	if (debug5)
         	USLOSS_Console("p1_quit(): cleared pages \n");
 
     	// destroy the page table
     	free(proc->pageTable); 
 
-    	if (DEBUG)
+    	if (debug5)
         	USLOSS_Console("p1_quit(): freed page table \n");
     }
 } /* p1_quit */

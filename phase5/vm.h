@@ -11,8 +11,9 @@
 /*
  * Different states for a page.
  */
-#define UNUSED 500
-#define INCORE 501
+#define UNUSED 500 // untouched
+#define INCORE 501 // on the disk
+#define ACTIVE 502 // in the frame table
 /* You'll probably want more states */
 
 
@@ -51,7 +52,7 @@ typedef struct FaultMsg {
 /* Information about each Frame */
 typedef struct Frame {
     int pid;        // pid of process using the frame, -1 if none
-    int status;     // whether it is free/in use
+    int state;      // whether it is free/in use
     // other stuff
 } Frame;
 

@@ -29,7 +29,7 @@ static int Pager(char *);
 void setUserMode();
 
 /* Globals */
-int debug5 = 0;
+int debug5 = 1;
 Process processes[MAXPROC];
 FaultMsg faults[MAXPROC]; /* Note that a process can have only
                            * one fault at a time, so we can
@@ -206,7 +206,7 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     int i;
     for (i = 0; i < frames; i++) {
         frameTable[i].pid = -1;
-        frameTable[i].status = UNUSED;
+        frameTable[i].state = UNUSED;
     }
     numFrames = frames;
 
@@ -223,7 +223,7 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
         // initialize the fault structs
         faults[i].pid = -1;
         faults[i].addr = NULL;
-        faults[i].replyMbox = MboxCreate(0, 0); // assuming this is just used to block/unblock the process.... probably wrong
+        faults[i].replyMbox = MboxCreate(1, 0); // assuming this is just used to block/unblock the process.... probably wrong
     }
 
    /* 
@@ -234,6 +234,7 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
    /*
     * Fork the pagers.
     */
+    vmRegion = USLOSS_MmuRegion(&dummy); // set vmRegion
     if (debug5) 
         USLOSS_Console("vmInitReal: forking pagers... \n");
     // fill pagerPids with -1s
@@ -262,8 +263,6 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     vmStats.freeDiskBlocks = 2*diskBlocks;
     vmStats.new = 1;
 
-    vmRegion = USLOSS_MmuRegion(&dummy);
-    memset((char *)vmRegion, 0, dummy*USLOSS_MmuPageSize());
     if (debug5) 
         USLOSS_Console("vmInitReal: returning vmRegion = %d \n", vmRegion);
     return vmRegion;
@@ -417,7 +416,7 @@ FaultHandler(int  type /* USLOSS_MMU_INT */,
     if (debug5) 
         USLOSS_Console("FaultHandler: sent fault to pagers, blocking... \n");
    // block
-   MboxSend(fault->replyMbox, 0, 0);
+   MboxReceive(fault->replyMbox, 0, 0);
 
 } /* FaultHandler */
 
@@ -450,31 +449,52 @@ Pager(char *buf)
         Process *proc = &processes[fault.pid % MAXPROC];
 
         /* Look for free frame */
-        int i;
-        for (i = 0; i < numFrames; i++) {
-            if (frameTable[i].status == UNUSED) {
+        int frame;
+        for (frame = 0; frame < numFrames; frame++) {
+            if (frameTable[frame].state == UNUSED) {
                 if (debug5) 
-                    USLOSS_Console("Pager: found frame %d free \n", i);
+                    USLOSS_Console("Pager: found frame %d free \n", frame);
                 break;
             }
         }
 
         /* If there isn't one then use clock algorithm to
          * replace a page (perhaps write to disk) */
-        if (i == numFrames) {
+        if (frame == numFrames) {
             // DO THAT STUFF ^
         }
 
         /* Load page into frame from disk, if necessary */
+        
+        // map page 0 to frame so we can write to it
+        USLOSS_MmuMap(TAG, 0, frame, USLOSS_MMU_PROT_RW);
+        if (debug5) 
+            USLOSS_Console("Pager: mapped frame %d \n", frame);
 
+        // zero out frame
+        // vmRegion + page# * PageSize
+        memset(vmRegion, 0, USLOSS_MmuPageSize());
+        if (debug5) 
+            USLOSS_Console("Pager: zeroed frame %d \n", frame);
 
-        // set frame in PTE
-        proc->pageTable[fault.pageNum].frame = i;
+        // set page to be not referenced and clean
+        USLOSS_MmuSetAccess(frame, 0);
+
+        // unmap page
+        USLOSS_MmuUnmap(TAG, 0);
+
+        // update frame info
+        frameTable[frame].state = ACTIVE;
+        frameTable[frame].pid = proc->pid;
+
+        // set frame in process's PTE
+        proc->pageTable[fault.pageNum].frame = frame;
+        proc->pageTable[fault.pageNum].state = ACTIVE;
 
         if (debug5) 
-            USLOSS_Console("Pager: set page %d to frame %d, unblocking process %d \n", fault.pageNum, i, proc->pid);
+            USLOSS_Console("Pager: set page %d to frame %d, unblocking process %d \n", fault.pageNum, frame, proc->pid);
         /* Unblock waiting (faulting) process */
-        MboxReceive(fault.replyMbox, 0, 0);
+        MboxSend(fault.replyMbox, 0, 0);
     }
     return 0;
 } /* Pager */

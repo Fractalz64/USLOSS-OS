@@ -13,9 +13,10 @@
  */
 #define UNUSED 500 // untouched
 #define INCORE 501 // on the disk
-#define ACTIVE 502 // in the frame table
-/* You'll probably want more states */
+#define INFRAME 502 // in the frame table
 
+#define USED 503 // frame that is mapped to a page in memory
+#define SWAPDISK 1 // disk to use
 
 /*
  * Page table entry.
@@ -26,6 +27,22 @@ typedef struct PTE {
     int  diskBlock;  // Disk block that stores the page (if any). -1 if none.
     // Add more stuff here
 } PTE;
+
+/* Frame table entry */
+typedef struct FTE {
+    int pid;        // pid of process using the frame, -1 if none
+    int state;      // whether it is free/in use
+    int page;       // the page using this frame
+    // other stuff
+} FTE;
+
+/* Disk table entry */
+typedef struct DTE {
+    int pid;        // pid of process using this disk block, -1 if none
+    int page;       // the page using this disk block
+    int track;      // what track the page is on
+    int sector;     // sector it starts on
+} DTE;
 
 /*
  * Per-process information.
@@ -49,11 +66,5 @@ typedef struct FaultMsg {
     // Add more stuff here.
 } FaultMsg;
 
-/* Information about each Frame */
-typedef struct Frame {
-    int pid;        // pid of process using the frame, -1 if none
-    int state;      // whether it is free/in use
-    // other stuff
-} Frame;
 
 #define CheckMode() assert(USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE)

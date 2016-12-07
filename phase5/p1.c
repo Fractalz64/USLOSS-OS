@@ -20,7 +20,7 @@ void clearPage(PTE *page) {
 }
 
 /* Fills the given Frame with default values */
-void clearFrame(Frame *frame) {
+void clearFrame(FTE *frame) {
     frame->state = UNUSED;
     frame->pid = -1;
 }
@@ -69,11 +69,13 @@ p1_switch(int old, int new)
 
 	// unload old process's mappings
 	if (old > 0) {
+		int dummy, dummy2, result; // used to check mappings
 		Process *oldProc = &processes[old % MAXPROC];
 		if (oldProc->pageTable != NULL) {
 			for (i = 0; i < oldProc->numPages; i++) {
-				if (oldProc->pageTable[i].state == ACTIVE) { // there is a valid mapping
-					//clearFrame(&oldProc->pageTable[i].frame);
+				// check if there is a valid mapping
+				result = USLOSS_MmuGetMap(TAG, i, &dummy, &dummy2);
+				if (result != USLOSS_MMU_ERR_NOMAP) { 
 					USLOSS_MmuUnmap(TAG, i);
                 }
 			}
@@ -87,7 +89,7 @@ p1_switch(int old, int new)
 		Process *newProc = &processes[new % MAXPROC];
 		if (newProc->pageTable != NULL) {
 			for (i = 0; i < newProc->numPages; i++) {
-				if (newProc->pageTable[i].state == ACTIVE) { // there is a valid mapping
+				if (newProc->pageTable[i].state == INFRAME) { // check if there is a valid mapping
 					USLOSS_MmuMap(TAG, i, newProc->pageTable[i].frame, USLOSS_MMU_PROT_RW);
                     if (debug5)
                         USLOSS_Console("p1_switch(): mapped page %d to frame %d for proc %d \n", i, newProc->pageTable[i].frame, new);

@@ -8,6 +8,7 @@
 #include <libuser.h>
 #include <vm.h>
 #include <string.h>
+#include <providedPrototypes.h>
 
 extern void mbox_create(systemArgs *args_ptr);
 extern void mbox_release(systemArgs *args_ptr);
@@ -36,12 +37,13 @@ FaultMsg faults[MAXPROC]; /* Note that a process can have only
                            * allocate the messages statically
                            * and index them by pid. */
 VmStats  vmStats;
-Frame *frameTable;
-int numFrames;
+FTE *frameTable;
+DTE *diskTable; 
 int faultMBox; // faults waiting for pagers
 int pagerPids[MAXPAGERS]; // pids of the pagers
 void *vmRegion = NULL; // address of the beginning of the virtual memory region
-
+int clockHand; // index of frame the clock hand is currently at
+int clockSem; // semaphore for moving the clock hand
 
 
 /*
@@ -202,13 +204,12 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
      */
     if (debug5) 
         USLOSS_Console("vmInitReal: initializing frame table... \n");
-    frameTable = malloc(frames * sizeof(Frame));
+    frameTable = malloc(frames * sizeof(FTE));
     int i;
     for (i = 0; i < frames; i++) {
         frameTable[i].pid = -1;
         frameTable[i].state = UNUSED;
     }
-    numFrames = frames;
 
    /*
     * Initialize page tables.
@@ -231,10 +232,13 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
     */
     faultMBox = MboxCreate(pagers, sizeof(FaultMsg));
 
+    // set up the clock hand
+    clockHand = 0; // start at frame 0
+    clockSem = semcreateReal(1); // mutex
+
    /*
     * Fork the pagers.
     */
-    vmRegion = USLOSS_MmuRegion(&dummy); // set vmRegion
     if (debug5) 
         USLOSS_Console("vmInitReal: forking pagers... \n");
     // fill pagerPids with -1s
@@ -245,24 +249,36 @@ vmInitReal(int mappings, int pages, int frames, int pagers)
         pagerPids[i] = fork1("Pager", Pager, NULL, 8*USLOSS_MIN_STACK, PAGER_PRIORITY);
     }
 
-   /*
-    * Zero out, then initialize, the vmStats structure
-    */
-    memset((char *) &vmStats, 0, sizeof(VmStats));
-
     // get diskBlocks = tracks on disk
     if (debug5) 
         USLOSS_Console("vmInitReal: getting disk size... \n");
     int diskBlocks;
-    diskSizeReal(1, &dummy, &dummy, &diskBlocks);
+    diskSizeReal(SWAPDISK, &dummy, &dummy, &diskBlocks);
+    diskBlocks *= 2; // two pages per block
 
+    // init disk table
+    if (debug5) 
+        USLOSS_Console("vmInitReal: initing disk table, diskBlocks = %d... \n", diskBlocks);
+    diskTable = malloc(diskBlocks * sizeof(DTE));
+    for (i = 0; i < diskBlocks; i++) {
+        diskTable[i].pid = -1;
+        diskTable[i].track = -1;
+        diskTable[i].sector = -1;
+        diskTable[i].page = -1;
+    }
+
+   /*
+    * Zero out, then initialize, the vmStats structure
+    */
+    memset((char *) &vmStats, 0, sizeof(VmStats));
     vmStats.pages = pages;
     vmStats.frames = frames;
-    vmStats.diskBlocks = 2*diskBlocks; 
+    vmStats.diskBlocks = diskBlocks; 
     vmStats.freeFrames = frames;
-    vmStats.freeDiskBlocks = 2*diskBlocks;
-    vmStats.new = 1;
+    vmStats.freeDiskBlocks = diskBlocks;
+    vmStats.new = 0;
 
+    vmRegion = USLOSS_MmuRegion(&dummy); // set vmRegion
     if (debug5) 
         USLOSS_Console("vmInitReal: returning vmRegion = %d \n", vmRegion);
     return vmRegion;
@@ -447,10 +463,11 @@ Pager(char *buf)
         if (debug5) 
             USLOSS_Console("Pager: got fault from process %d, address %d, page %d\n", fault.pid, fault.addr, fault.pageNum);
         Process *proc = &processes[fault.pid % MAXPROC];
+        PTE *page = &proc->pageTable[fault.pageNum];
 
         /* Look for free frame */
         int frame;
-        for (frame = 0; frame < numFrames; frame++) {
+        for (frame = 0; frame < vmStats.frames; frame++) {
             if (frameTable[frame].state == UNUSED) {
                 if (debug5) 
                     USLOSS_Console("Pager: found frame %d free \n", frame);
@@ -460,22 +477,64 @@ Pager(char *buf)
 
         /* If there isn't one then use clock algorithm to
          * replace a page (perhaps write to disk) */
-        if (frame == numFrames) {
-            // DO THAT STUFF ^
+        int access;
+        while (frame == vmStats.frames) {
+            if (debug5) 
+                USLOSS_Console("Pager: no free frame found\n");
+            sempReal(clockSem); // get mutex
+            USLOSS_MmuGetAccess(clockHand, &access);
+            // if frame is unreferenced (and not being used by another process), use it!
+            if (access < 2) { // and check if it is not chosen by another pager...
+                if (debug5)
+                    USLOSS_Console("Pager: replacing frame %d, prev owner: proc %d, prev page: %d \n", clockHand, frameTable[frame].pid, frameTable[frame].page);
+                frame = clockHand;
+
+                // remove old page
+                Process *oldProc = &processes[frameTable[frame].pid];
+                oldProc->pageTable[frameTable[frame].page].state = INCORE;
+                oldProc->pageTable[frameTable[frame].page].frame = -1;
+                // UNMAP!!!!
+
+                // set pid so other pagers won't choose this page
+                frameTable[clockHand].pid = proc->pid;
+
+                /* save frame to diiisk */
+                vmStats.replaced++; // increment replaced pages 
+            }
+            else { // clear reference bit
+                USLOSS_MmuSetAccess(clockHand, access & 2);
+                if (debug5) 
+                    USLOSS_Console("Pager: cleared reference bit for frame %d \n", clockHand);
+            }
+            clockHand = (clockHand + 1) % vmStats.frames; // increment clock hand
+            semvReal(clockSem); // release mutex
         }
 
-        /* Load page into frame from disk, if necessary */
-        
         // map page 0 to frame so we can write to it
         USLOSS_MmuMap(TAG, 0, frame, USLOSS_MMU_PROT_RW);
         if (debug5) 
             USLOSS_Console("Pager: mapped frame %d \n", frame);
 
-        // zero out frame
-        // vmRegion + page# * PageSize
-        memset(vmRegion, 0, USLOSS_MmuPageSize());
-        if (debug5) 
-            USLOSS_Console("Pager: zeroed frame %d \n", frame);
+        // zero out if this is the first time it has been used
+        if (page->state == UNUSED) {
+            // vmRegion + page# * PageSize
+            memset(vmRegion, 0, USLOSS_MmuPageSize());
+            if (debug5) 
+                USLOSS_Console("Pager: zeroed frame %d \n", frame);
+            vmStats.new++; // increment new
+        }
+
+        // load page from disk
+        else if (page->state == INCORE) {
+            DTE *diskBlock = &diskTable[page->diskBlock];
+            void *buffer = malloc(USLOSS_MmuPageSize()); // buffer for disk
+            // read from disk
+            diskReadReal (SWAPDISK, diskBlock->track, diskBlock->sector,
+                          USLOSS_MmuPageSize()/USLOSS_DISK_SECTOR_SIZE, buffer);
+            // copy to frame
+            memcpy(vmRegion + fault.pageNum * USLOSS_MmuPageSize(), buffer, USLOSS_MmuPageSize());
+            vmStats.pageIns++; // increment pages loaded
+        }
 
         // set page to be not referenced and clean
         USLOSS_MmuSetAccess(frame, 0);
@@ -483,13 +542,14 @@ Pager(char *buf)
         // unmap page
         USLOSS_MmuUnmap(TAG, 0);
 
-        // update frame info
-        frameTable[frame].state = ACTIVE;
+        // update frame table
         frameTable[frame].pid = proc->pid;
+        frameTable[frame].page = fault.pageNum;
+        frameTable[frame].state = USED;
 
-        // set frame in process's PTE
+        // update page table
         proc->pageTable[fault.pageNum].frame = frame;
-        proc->pageTable[fault.pageNum].state = ACTIVE;
+        proc->pageTable[fault.pageNum].state = INFRAME;
 
         if (debug5) 
             USLOSS_Console("Pager: set page %d to frame %d, unblocking process %d \n", fault.pageNum, frame, proc->pid);

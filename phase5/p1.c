@@ -8,6 +8,8 @@
 #define TAG 0
 extern int debug5;
 extern Process processes[MAXPROC];
+extern FTE *frameTable;
+extern DTE *diskTable;
 extern void *vmRegion;
 extern VmStats vmStats;
 
@@ -17,6 +19,7 @@ void clearPage(PTE *page) {
     page->state = UNUSED;
     page->frame = -1;
     page->diskBlock = -1;
+    // clear from disk table and frame table too
 }
 
 /* Fills the given Frame with default values */
@@ -58,8 +61,8 @@ p1_fork(int pid)
 void
 p1_switch(int old, int new)
 {
-    if (debug5)
-        USLOSS_Console("p1_switch() called: old = %d, new = %d\n", old, new);
+    // if (debug5)
+    //     USLOSS_Console("p1_switch() called: old = %d, new = %d\n", old, new);
 
     if (vmRegion == NULL)
     	return;
@@ -77,12 +80,12 @@ p1_switch(int old, int new)
 				result = USLOSS_MmuGetMap(TAG, i, &dummy, &dummy2);
 				if (result != USLOSS_MMU_ERR_NOMAP) { 
 					USLOSS_MmuUnmap(TAG, i);
+                    if (debug5)
+                        USLOSS_Console("p1_switch(): unmapped page %d for proc %d \n", i, old);
                 }
 			}
 		}
 	}
-	if (debug5)
-        USLOSS_Console("p1_switch(): unloaded old pages \n");
 
 	// map new process's pages
 	if (new > 0) {
@@ -103,6 +106,8 @@ p1_switch(int old, int new)
 void
 p1_quit(int pid)
 {
+	int i, frame, dummy, result;
+
     if (debug5)
         USLOSS_Console("p1_quit() called: pid = %d\n", pid);
 
@@ -111,8 +116,28 @@ p1_quit(int pid)
     	Process *proc = &processes[pid % MAXPROC];
         if (proc->pageTable == NULL) 
             return;
-    	int i;
     	for (i = 0; i < proc->numPages; i++) {
+    		// free the frames
+    		result = USLOSS_MmuGetMap(TAG, i, &frame, &dummy);
+			if (result != USLOSS_MMU_ERR_NOMAP) { 
+				// free the disk block
+				if (proc->pageTable[i].diskBlock > -1) {
+					diskTable[proc->pageTable[i].diskBlock].pid = -1;
+					diskTable[proc->pageTable[i].diskBlock].page = -1;
+					//vmStats.freeDiskBlocks++;
+				}
+
+				USLOSS_MmuUnmap(TAG, i); // unmap
+
+				// free the frame
+				frameTable[frame].pid = -1;
+				frameTable[frame].state = UNUSED;
+				frameTable[frame].page = -1;
+				vmStats.freeFrames++;
+				if (debug5)
+        			USLOSS_Console("p1_quit(): freed frame %d, free frames = %d \n", frame, vmStats.freeFrames);
+			}
+
             clearPage(&proc->pageTable[i]);
     	}
 
